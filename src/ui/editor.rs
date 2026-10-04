@@ -72,7 +72,10 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
             w = bx.saturating_sub(value_x + 1);
         }
         let field = &form.fields[i];
-        let chars: Vec<char> = if i == F_PASS && !form.reveal {
+        // The TOTP secret is as sensitive as the password: anyone who sees it
+        // can generate codes indefinitely.
+        let secret = i == F_PASS || i == F_OTP;
+        let chars: Vec<char> = if secret && !form.reveal {
             mask(field.text.chars().count()).chars().collect()
         } else {
             field.text.chars().collect()
@@ -134,7 +137,7 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
         ],
     );
     let hint = match form.focus {
-        F_OTP => "otpauth:// URL or base32 secret",
+        F_OTP => "otpauth:// URL or base32 secret · ^r show",
         F_NOTES => "⏎ new line · tab next field",
         _ => "tab/↑↓ next field · ^u clear",
     };

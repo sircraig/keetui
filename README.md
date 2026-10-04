@@ -83,7 +83,8 @@ the terminal instead, or start with `--no-mouse`.
 
 ### Entry editor
 
-`Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password, `Ctrl-g`
+`Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password and TOTP
+secret (both are masked otherwise), `Ctrl-g`
 generates one, `Ctrl-u` clears the field, `Ctrl-s` saves the entry, `Esc`
 cancels. Pasting inserts into the focused field (line breaks are kept only
 in Notes); outside a text field or the search box a paste is ignored, so

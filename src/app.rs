@@ -2223,6 +2223,27 @@ mod tests {
     }
 
     #[test]
+    fn editor_masks_the_totp_secret() {
+        let (_dir, mut app) = unlocked(|db| {
+            db.root_mut().add_entry().edit(|e| {
+                e.set_unprotected(fields::TITLE, "Site");
+                e.set_protected(fields::OTP, "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP");
+            });
+        });
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(matches!(app.screen, Screen::EntryEdit(_)));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        assert!(!screen_text(&terminal).contains("JBSWY3DP"));
+
+        app.on_key(ctrl('r'));
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        assert!(screen_text(&terminal).contains("JBSWY3DP"));
+    }
+
+    #[test]
     fn revealed_password_hides_itself() {
         let (_dir, mut app) = lockable();
         app.on_key(key(KeyCode::Char('r')));
