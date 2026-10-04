@@ -6,6 +6,7 @@ mod unlock;
 
 use chrono::{NaiveDateTime, TimeZone};
 use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -63,6 +64,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// A modal takes over the mouse: only regions it registers are clickable.
 fn modal_begin(app: &App) {
     app.hits.borrow_mut().clear();
+}
+
+/// A click that replays a key press.
+pub(crate) fn key(code: KeyCode) -> Hit {
+    Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// A click that replays a character key.
+pub(crate) fn ch(c: char) -> Hit {
+    key(KeyCode::Char(c))
+}
+
+/// A click that replays Ctrl plus a character.
+pub(crate) fn ctrl(c: char) -> Hit {
+    Hit::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
 }
 
 pub(crate) fn hit(app: &App, rect: Rect, h: Hit) {

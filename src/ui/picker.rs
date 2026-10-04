@@ -2,7 +2,7 @@ use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -11,11 +11,9 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use crate::app::{App, Hit};
 use crate::picker::{ItemKind, PickerState, size_label, tilde};
 
-use super::{ACCENT, DIM, ERR, btn, buttons, centered, hit, scroll_window, selection_style, width};
-
-fn key(code: KeyCode, mods: KeyModifiers) -> Hit {
-    Hit::Key(KeyEvent::new(code, mods))
-}
+use super::{
+    ACCENT, DIM, ERR, btn, buttons, centered, ctrl, hit, key, scroll_window, selection_style, width,
+};
 
 pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     let area = frame.area();
@@ -159,19 +157,15 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
         inner.bottom() - 1,
         inner.right(),
         vec![
-            btn("⏎", "open", key(KeyCode::Enter, KeyModifiers::NONE)),
-            btn("⌫", "up", key(KeyCode::Left, KeyModifiers::NONE)),
-            btn(
-                "^n",
-                "new database",
-                key(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            ),
+            btn("⏎", "open", key(KeyCode::Enter)),
+            btn("⌫", "up", key(KeyCode::Left)),
+            btn("^n", "new database", ctrl('n')),
             btn(
                 "^a",
                 if st.show_all { "kdbx only" } else { "show all" },
-                key(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                ctrl('a'),
             ),
-            btn("esc", back, key(KeyCode::Esc, KeyModifiers::NONE)),
+            btn("esc", back, key(KeyCode::Esc)),
         ],
     );
 }

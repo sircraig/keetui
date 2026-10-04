@@ -13,7 +13,7 @@ use crate::event::Action;
 
 use super::{
     ACCENT, Btn, DIM, ERR, HIDDEN, OK, WARN, btn, buttons, buttons_right, buttons_width, hit,
-    hovered, key_bar, scroll_window, selection_style, truncate, width,
+    hovered, key, key_bar, scroll_window, selection_style, truncate, width,
 };
 
 const LABEL_W: u16 = 10;
@@ -709,8 +709,7 @@ fn draw_keys(frame: &mut Frame, app: &App, area: Rect) {
     let act = Hit::Act;
     let mut items = Vec::new();
     if app.search_input {
-        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let key = |c| Hit::Key(KeyEvent::new(c, KeyModifiers::NONE));
+        use ratatui::crossterm::event::KeyCode;
         items.push(btn("↑↓", "select", key(KeyCode::Down)));
         items.push(btn("⏎", "done", key(KeyCode::Enter)));
         items.push(btn("esc", "cancel", key(KeyCode::Esc)));

@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -8,18 +8,11 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use crate::app::{App, ENTRY_FIELD_LABELS, EntryForm, F_NOTES, F_OTP, F_PASS, GroupForm, Hit};
 
 use super::{
-    ACCENT, DIM, btn, buttons, buttons_right, centered, hit, mask, scroll_window, skip_cells, width,
+    ACCENT, DIM, btn, buttons, buttons_right, centered, ctrl, hit, key, mask, scroll_window,
+    skip_cells, width,
 };
 
 const LABEL_W: u16 = 11;
-
-fn ctrl(c: char) -> Hit {
-    Hit::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
-}
-
-fn key(code: KeyCode) -> Hit {
-    Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
-}
 
 fn modal_block(title: &'static str) -> Block<'static> {
     Block::bordered()

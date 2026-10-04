@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -7,15 +7,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use crate::app::{App, ConfirmState, GenState, Hit, Overlay, PendingAction, Screen};
 
-use super::{ACCENT, DIM, ERR, WARN, btn, button, buttons, centered, hit};
-
-fn key(code: KeyCode) -> Hit {
-    Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
-}
-
-fn ch(c: char) -> Hit {
-    key(KeyCode::Char(c))
-}
+use super::{ACCENT, DIM, ERR, WARN, btn, button, buttons, centered, ch, hit, key};
 
 fn modal(
     frame: &mut Frame,

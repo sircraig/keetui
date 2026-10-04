@@ -1,7 +1,7 @@
 //! The unlock and new-database screens.
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -13,14 +13,11 @@ use crate::app::{
 };
 
 use super::{
-    ACCENT, DIM, ERR, OK, WARN, btn, buttons, centered, hit, mask, scroll_window, truncate,
+    ACCENT, DIM, ERR, OK, WARN, btn, buttons, centered, ctrl, hit, key, mask, scroll_window,
+    truncate,
 };
 
 const LABEL_W: u16 = 11;
-
-fn key(code: KeyCode, mods: KeyModifiers) -> Hit {
-    Hit::Key(KeyEvent::new(code, mods))
-}
 
 /// The bordered box shared by both screens; returns its padded inner area.
 fn panel(frame: &mut Frame, h: u16, title: &'static str) -> Option<Rect> {
@@ -122,21 +119,13 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
         },
     );
 
-    let mut btns = vec![btn("⏎", "unlock", key(KeyCode::Enter, KeyModifiers::NONE))];
+    let mut btns = vec![btn("⏎", "unlock", key(KeyCode::Enter))];
     // Switching databases would drop the unsaved work held by the lock.
     if !app.locked_with_unsaved_work() {
-        btns.push(btn(
-            "^o",
-            "open other",
-            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
-        ));
-        btns.push(btn(
-            "^n",
-            "new",
-            key(KeyCode::Char('n'), KeyModifiers::CONTROL),
-        ));
+        btns.push(btn("^o", "open other", ctrl('o')));
+        btns.push(btn("^n", "new", ctrl('n')));
     }
-    btns.push(btn("esc", "quit", key(KeyCode::Esc, KeyModifiers::NONE)));
+    btns.push(btn("esc", "quit", key(KeyCode::Esc)));
     buttons(frame, app, inner.x, inner.bottom() - 1, inner.right(), btns);
 
     if !st.working {
@@ -223,19 +212,11 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
         inner.right(),
         vec![
             // Ctrl-s creates from any field (Enter only on the last ones).
-            btn(
-                "^s",
-                "create",
-                key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-            ),
-            btn(
-                "^r",
-                if st.reveal { "hide" } else { "show" },
-                key(KeyCode::Char('r'), KeyModifiers::CONTROL),
-            ),
+            btn("^s", "create", ctrl('s')),
+            btn("^r", if st.reveal { "hide" } else { "show" }, ctrl('r')),
             // Esc always goes back: to the unlock screen when there is a
             // database to unlock, otherwise to the file picker.
-            btn("esc", "back", key(KeyCode::Esc, KeyModifiers::NONE)),
+            btn("esc", "back", key(KeyCode::Esc)),
         ],
     );
     hint(frame, inner, "tab next field");
