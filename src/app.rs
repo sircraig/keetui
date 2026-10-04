@@ -1564,7 +1564,9 @@ impl App {
         }
 
         self.dirty = true;
-        self.sel_entry = Some(id);
+        // Through select_entry, which hides a password revealed for the
+        // previously selected entry.
+        self.select_entry(id);
         self.pane = Pane::Entries;
         self.rebuild();
         let verb = if form.target.is_some() {
@@ -2682,6 +2684,27 @@ mod tests {
         app.on_key(key(KeyCode::Tab));
         let text = draw(&app);
         assert!(text.contains("[d delete]") && text.contains("[e edit]"));
+    }
+
+    #[test]
+    fn a_new_entry_starts_with_its_password_hidden() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('r')));
+        assert!(app.reveal, "Alpha-entry's password revealed");
+
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_TITLE].set_text("Charlie");
+        form.fields[F_PASS].set_text("charlie-secret");
+        form.modified = true;
+        app.on_key(ctrl('s'));
+        let v = app.vault.as_ref().unwrap();
+        let selected = v.db.entry(app.sel_entry.unwrap()).unwrap();
+        assert_eq!(selected.get_title(), Some("Charlie"));
+        assert!(!app.reveal, "the new entry's password is shown in clear");
     }
 
     #[test]
