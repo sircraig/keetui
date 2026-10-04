@@ -441,8 +441,8 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    if e.get_raw_otp_value().is_some() {
-        match e.get_otp().map(|t| t.value_now()) {
+    if let Some(raw) = e.get_raw_otp_value() {
+        match crate::totp::parse(raw).map(|t| t.value_now()) {
             Ok(Ok(code)) => {
                 let left = code.valid_for.as_secs();
                 let period = code.period.as_secs().max(1);

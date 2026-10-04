@@ -1008,8 +1008,8 @@ impl App {
                 Action::CopyPass => (e.get_password().unwrap_or("").to_string(), "password"),
                 Action::CopyUrl => (e.get_url().unwrap_or("").to_string(), "URL"),
                 Action::CopyOtp => {
-                    let totp = e.get_otp().map_err(|_| "entry has no TOTP set up")?;
-                    let code = totp.value_now().map_err(|e| e.to_string())?;
+                    let raw = e.get_raw_otp_value().ok_or("entry has no TOTP set up")?;
+                    let code = totp::parse(raw)?.value_now().map_err(|e| e.to_string())?;
                     (code.code, "TOTP code")
                 }
                 _ => return Err("not a copy action".into()),
@@ -1202,6 +1202,30 @@ impl App {
     }
 
     fn commit_entry_form(&mut self) {
+        // OTP settings that can't produce codes would only fail later (or,
+        // before validation existed, crash the detail pane): keep the form
+        // open on the OTP field instead.
+        let otp_error = match &self.screen {
+            Screen::EntryEdit(form) => {
+                let raw = form.fields[F_OTP].text.trim();
+                (!raw.is_empty())
+                    .then(|| {
+                        let otp =
+                            Zeroizing::new(totp::normalize_otp(raw, &form.fields[F_TITLE].text));
+                        totp::parse(&otp).err()
+                    })
+                    .flatten()
+            }
+            _ => None,
+        };
+        if let Some(msg) = otp_error {
+            if let Screen::EntryEdit(form) = &mut self.screen {
+                form.focus = F_OTP;
+            }
+            self.set_error(msg);
+            return;
+        }
+
         let Screen::EntryEdit(form) = mem::replace(&mut self.screen, Screen::Browser) else {
             return;
         };
@@ -1741,6 +1765,89 @@ fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// An App that has unlocked a fresh vault (password "pw", cheap key
+    /// derivation) whose contents `fill` sets up.
+    fn unlocked(fill: impl FnOnce(&mut keepass::Database)) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.kdbx");
+        let mut db = keepass::Database::new();
+        if let keepass::config::KdfConfig::Argon2 {
+            iterations,
+            memory,
+            parallelism,
+            ..
+        } = &mut db.config.kdf_config
+        {
+            (*iterations, *memory, *parallelism) = (1, 64 * 1024, 1);
+        }
+        fill(&mut db);
+        let mut file = std::fs::File::create(&path).unwrap();
+        db.save(&mut file, keepass::DatabaseKey::new().with_password("pw"))
+            .unwrap();
+
+        let mut app = App::new(Some(path), None);
+        let Screen::Unlock(st) = &mut app.screen else {
+            panic!("expected the unlock screen");
+        };
+        st.password.set_text("pw");
+        st.working = true;
+        app.on_tick();
+        assert!(matches!(app.screen, Screen::Browser), "unlock failed");
+        (dir, app)
+    }
+
+    #[test]
+    fn unusable_totp_settings_do_not_crash() {
+        let (_dir, mut app) = unlocked(|db| {
+            db.root_mut().add_entry().edit(|e| {
+                e.set_unprotected(fields::TITLE, "Broken");
+                e.set_protected(
+                    fields::OTP,
+                    "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0",
+                );
+            });
+        });
+        // The entry is selected right after unlock; drawing it used to panic.
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(
+            matches!(&app.status, Some((msg, StatusKind::Error, _)) if msg.contains("period")),
+            "copying the TOTP code should report the bad period"
+        );
+    }
+
+    #[test]
+    fn editor_rejects_unusable_totp_settings() {
+        let (_dir, mut app) = unlocked(|_| {});
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_OTP].set_text("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=64");
+        app.on_key(ctrl('s'));
+        assert!(matches!(&app.screen, Screen::EntryEdit(f) if f.focus == F_OTP));
+        assert!(!app.dirty);
+
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            unreachable!()
+        };
+        form.fields[F_OTP].set_text("JBSWY3DPEHPK3PXP");
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.screen, Screen::Browser));
+        assert!(app.dirty);
+    }
 
     #[test]
     fn text_field_editing() {
