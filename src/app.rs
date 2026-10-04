@@ -538,8 +538,31 @@ impl App {
         {
             self.lock(&format!("Locked after {} of inactivity", minutes(after)));
         }
+        // Polls a running unlock. Creating a database waits for
+        // run_pending, so "Creating…" is always drawn first.
         self.try_unlock();
-        self.try_create();
+    }
+
+    /// Run the slow work the last input scheduled (starting an unlock,
+    /// creating a database) as soon as the frame announcing it is drawn: the
+    /// main loop calls this right after each draw. Returns whether
+    /// anything changed, so the result can be drawn.
+    pub fn run_pending(&mut self) -> bool {
+        let unlocking =
+            matches!(&self.screen, Screen::Unlock(st) if st.working && st.job.is_none());
+        let creating = matches!(&self.screen, Screen::Create(st) if st.working);
+        if unlocking {
+            self.try_unlock();
+        }
+        if creating {
+            self.try_create();
+        }
+        unlocking || creating
+    }
+
+    /// An unlock is running in the background.
+    pub fn busy(&self) -> bool {
+        matches!(&self.screen, Screen::Unlock(st) if st.job.is_some())
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -2244,6 +2267,40 @@ mod tests {
         db.save(&mut file, keepass::DatabaseKey::new().with_password("pw"))
             .unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn scheduled_work_starts_right_after_the_next_draw() {
+        // Creating a database: Enter schedules it, a tick doesn't run it (the
+        // "Creating…" frame comes first), and run_pending does.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.kdbx");
+        let mut app = App::new(Some(path.clone()), None, None);
+        let Screen::Create(st) = &mut app.screen else {
+            panic!("expected the new-database screen");
+        };
+        st.fields[C_PASS].set_text("pw");
+        st.fields[C_CONFIRM].set_text("pw");
+        app.on_key(ctrl('s'));
+        app.on_tick();
+        assert!(!path.exists(), "created before Creating… was drawn");
+        assert!(app.run_pending());
+        assert!(matches!(app.screen, Screen::Browser) && path.exists());
+        assert!(!app.run_pending(), "nothing left to do");
+
+        // Unlocking: run_pending starts the background work right away.
+        let (_dir, path) = vault_file(|_| {});
+        let mut app = App::new(Some(path), None, None);
+        let Screen::Unlock(st) = &mut app.screen else {
+            panic!("expected the unlock screen");
+        };
+        st.password.set_text("pw");
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.busy());
+        assert!(app.run_pending());
+        assert!(app.busy());
+        finish_unlock(&mut app);
+        assert!(matches!(app.screen, Screen::Browser));
     }
 
     #[test]
