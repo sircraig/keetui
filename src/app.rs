@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use keepass::db::{EntryId, GroupId, Times, fields};
+use keepass::db::{EntryId, GroupId, Times, Value, fields};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -1526,6 +1526,39 @@ impl App {
         let url = form.fields[F_URL].text.to_string();
         let notes = form.fields[F_NOTES].text.to_string();
 
+        // Keep each field's protection, and add what the vault's memory
+        // protection settings ask for: writing a field unprotected would drop
+        // it quietly (keepass-rs doesn't re-apply the settings on save).
+        let settings = v.db.meta.memory_protection.clone().unwrap_or_default();
+        let existing = form.target.and_then(|id| v.db.entry(id));
+        let value = |key: &str, text: &str, by_setting: bool| {
+            let had_it = existing
+                .as_ref()
+                .and_then(|e| e.fields.get(key))
+                .is_some_and(|value| value.is_protected());
+            if by_setting || had_it {
+                Value::protected(text)
+            } else {
+                Value::unprotected(text)
+            }
+        };
+        let updates = [
+            (
+                fields::TITLE,
+                value(fields::TITLE, &title, settings.protect_title),
+            ),
+            (
+                fields::USERNAME,
+                value(fields::USERNAME, &username, settings.protect_username),
+            ),
+            (fields::PASSWORD, Value::protected(password.as_str())),
+            (fields::URL, value(fields::URL, &url, settings.protect_url)),
+            (
+                fields::NOTES,
+                value(fields::NOTES, &notes, settings.protect_notes),
+            ),
+        ];
+
         let id = match form.target {
             Some(id) => Some(id),
             None => v.db.group_mut(form.group).map(|mut g| g.add_entry().id()),
@@ -1542,11 +1575,9 @@ impl App {
         if form.target.is_some() {
             // Record the previous state in entry history, like KeePassXC does.
             e.edit_tracking(|e| {
-                e.set_unprotected(fields::TITLE, &title);
-                e.set_unprotected(fields::USERNAME, &username);
-                e.set_protected(fields::PASSWORD, password.as_str());
-                e.set_unprotected(fields::URL, &url);
-                e.set_unprotected(fields::NOTES, &notes);
+                for (key, value) in updates {
+                    e.set(key, value);
+                }
                 match &otp {
                     OtpChange::Keep => {}
                     OtpChange::Remove => {
@@ -1557,11 +1588,9 @@ impl App {
             });
         } else {
             e.edit(|e| {
-                e.set_unprotected(fields::TITLE, &title);
-                e.set_unprotected(fields::USERNAME, &username);
-                e.set_protected(fields::PASSWORD, password.as_str());
-                e.set_unprotected(fields::URL, &url);
-                e.set_unprotected(fields::NOTES, &notes);
+                for (key, value) in updates {
+                    e.set(key, value);
+                }
                 if let OtpChange::Set(otp) = &otp {
                     e.set_protected(fields::OTP, otp.as_str());
                 }
@@ -2738,6 +2767,53 @@ mod tests {
         );
         assert!(!app.dirty, "no-op saves marked the vault unsaved");
         assert_eq!(times(&app), before);
+    }
+
+    #[test]
+    fn editing_keeps_field_protection() {
+        let (_dir, mut app) = unlocked(|db| {
+            // Protect user names and notes, as a vault can be set up to.
+            db.meta.memory_protection = Some(keepass::db::MemoryProtection {
+                protect_username: true,
+                protect_notes: true,
+                ..Default::default()
+            });
+            db.root_mut().add_entry().edit(|e| {
+                e.set_unprotected(fields::TITLE, "Site");
+                e.set_protected(fields::USERNAME, "alice");
+                // Protected here although the vault doesn't ask for it.
+                e.set_protected(fields::URL, "https://example.com");
+                e.set_protected(fields::NOTES, "recovery codes");
+                e.set_protected(fields::PASSWORD, "pw1");
+            });
+        });
+        let protection = |app: &App| {
+            let v = app.vault.as_ref().unwrap();
+            let e = v.db.entry(app.sel_entry.unwrap()).unwrap();
+            [fields::TITLE, fields::USERNAME, fields::URL, fields::NOTES]
+                .map(|key| e.fields.get(key).is_some_and(|v| v.is_protected()))
+        };
+
+        // Changing only the password keeps the other fields protected.
+        change_password(&mut app, "pw2");
+        assert_eq!(protection(&app), [false, true, true, true]);
+
+        // A new entry follows the vault's settings.
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        for (i, text) in [
+            (F_TITLE, "New"),
+            (F_USER, "bob"),
+            (F_URL, "x"),
+            (F_NOTES, "n"),
+        ] {
+            form.fields[i].set_text(text);
+        }
+        form.modified = true;
+        app.on_key(ctrl('s'));
+        assert_eq!(protection(&app), [false, true, false, true]);
     }
 
     #[test]
