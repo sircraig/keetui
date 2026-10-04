@@ -27,6 +27,14 @@ unicode-width = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["process"] }
 
+# Argon2 is very slow unoptimized: without this, a few key-derivation tests
+# dominate `cargo test`, and debug builds take seconds to unlock or save.
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
+opt-level = 3
+
 [profile.release]
 strip = true
 lto = true
