@@ -112,7 +112,7 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
             Span::raw(format!("{reason}. Enter the master password to continue.")).fg(WARN),
         )
         .wrap(Wrap { trim: true }),
-        _ => message(st.working, "Unlocking…", error),
+        _ => message(st.working, "Unlocking…  (esc cancels)", error),
     };
     frame.render_widget(
         note,

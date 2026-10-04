@@ -35,9 +35,10 @@ New databases are KDBX4 with Argon2d (64 MiB), and KeePassXC can open them.
 
 ### Browsing
 
-Unlock with the master password (and optional key file). The screen has three
-panes — groups, entries, and the selected entry — with a key bar at the bottom
-that shows what you can do right now (every item in it is clickable).
+Unlock with the master password (and optional key file); `Esc` cancels an
+unlock that is taking too long. The screen has three panes — groups, entries,
+and the selected entry — with a key bar at the bottom that shows what you can
+do right now (every item in it is clickable).
 
 | Key | Action |
 |---|---|

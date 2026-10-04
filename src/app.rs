@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use keepass::db::{EntryId, GroupId, fields};
@@ -151,9 +152,13 @@ pub struct UnlockState {
     pub keyfile: TextField,
     pub focus_keyfile: bool,
     pub error: Option<String>,
-    /// Set when Enter was pressed; the (slow) unlock runs on the next tick so
-    /// the "unlocking…" frame gets drawn first.
+    /// Set when Enter was pressed; the unlock starts on the next tick so the
+    /// "unlocking…" frame gets drawn first.
     pub working: bool,
+    /// The unlock running on a worker thread. Key derivation takes a moment
+    /// by design, and a hostile file can make it take forever, so the UI
+    /// stays live and Esc can abandon it.
+    job: Option<Receiver<anyhow::Result<Vault>>>,
     /// Set when the session locked itself, saying why. Unlocking then picks
     /// up where the session left off.
     pub locked: Option<String>,
@@ -167,6 +172,7 @@ impl UnlockState {
             focus_keyfile: false,
             error: None,
             working: false,
+            job: None,
             locked: None,
         }
     }
@@ -709,10 +715,21 @@ impl App {
         let Screen::Unlock(st) = &mut self.screen else {
             return;
         };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if st.working {
+            // Only cancelling and quitting work while unlocking.
+            match key.code {
+                KeyCode::Esc => {
+                    // The worker's result, if it ever comes, is dropped.
+                    st.job = None;
+                    st.working = false;
+                    st.error = Some("unlocking cancelled".into());
+                }
+                KeyCode::Char('c') if ctrl => self.request_quit(),
+                _ => {}
+            }
             return;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             // Asks first when locked with unsaved work.
             KeyCode::Esc => self.request_quit(),
@@ -754,7 +771,8 @@ impl App {
         }
     }
 
-    /// Runs the blocking unlock scheduled by Enter on the unlock screen.
+    /// Drives the unlock scheduled by Enter on the unlock screen: starts it
+    /// on a worker thread, then polls it on each tick.
     fn try_unlock(&mut self) {
         let Screen::Unlock(st) = &mut self.screen else {
             return;
@@ -762,17 +780,18 @@ impl App {
         if !st.working {
             return;
         }
-        st.working = false;
-        let password = st.password.text.clone();
         let keyfile_text = st.keyfile.text.trim().to_string();
         let keyfile = (!keyfile_text.is_empty()).then(|| PathBuf::from(&keyfile_text));
         let resuming = st.locked.is_some();
 
         // Locked with unsaved work: the vault is still loaded, so check the
-        // key against it rather than re-reading the file.
+        // key against it rather than re-reading the file. That needs no key
+        // derivation, so no worker either.
         if self.resume.is_some()
             && let Some(v) = &self.vault
         {
+            st.working = false;
+            let password = st.password.text.clone();
             match v.key_matches(&password, keyfile.as_deref()) {
                 Ok(true) => {
                     if let Some((screen, overlay)) = self.resume.take() {
@@ -786,7 +805,20 @@ impl App {
             return;
         }
 
-        match Vault::open(&self.db_path, &password, keyfile.as_deref()) {
+        if st.job.is_none() {
+            let password = st.password.text.clone();
+            st.job = Some(spawn_unlock(self.db_path.clone(), password, keyfile));
+            return;
+        }
+        let result = match st.job.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => result,
+            Some(Err(TryRecvError::Empty)) | None => return,
+            Some(Err(TryRecvError::Disconnected)) => Err(anyhow::anyhow!("unlocking failed")),
+        };
+        st.job = None;
+        st.working = false;
+
+        match result {
             Ok(vault) => {
                 self.vault = Some(vault);
                 self.screen = Screen::Browser;
@@ -1987,6 +2019,20 @@ fn notes_vertical(field: &mut TextField, up: bool) -> bool {
     true
 }
 
+/// Open the vault on a worker thread. If the unlock is abandoned nobody
+/// receives the result, and the vault is dropped (and zeroized) with it.
+fn spawn_unlock(
+    path: PathBuf,
+    password: Zeroizing<String>,
+    keyfile: Option<PathBuf>,
+) -> Receiver<anyhow::Result<Vault>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Vault::open(&path, &password, keyfile.as_deref()));
+    });
+    rx
+}
+
 /// Pasted text for a multi-line field: line breaks normalized to `\n`,
 /// other control characters dropped.
 fn multiline(text: &str) -> String {
@@ -2027,9 +2073,36 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    /// Tick until a pending unlock has finished (it runs on a worker).
+    fn finish_unlock(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.on_tick();
+            let working = matches!(&app.screen, Screen::Unlock(st) if st.working);
+            if !working || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// An App that has unlocked a fresh vault (password "pw", cheap key
     /// derivation) whose contents `fill` sets up.
     fn unlocked(fill: impl FnOnce(&mut keepass::Database)) -> (tempfile::TempDir, App) {
+        let (dir, path) = vault_file(fill);
+        let mut app = App::new(Some(path), None, None);
+        let Screen::Unlock(st) = &mut app.screen else {
+            panic!("expected the unlock screen");
+        };
+        st.password.set_text("pw");
+        st.working = true;
+        finish_unlock(&mut app);
+        assert!(matches!(app.screen, Screen::Browser), "unlock failed");
+        (dir, app)
+    }
+
+    /// A fresh vault file (password "pw", cheap key derivation).
+    fn vault_file(fill: impl FnOnce(&mut keepass::Database)) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.kdbx");
         let mut db = keepass::Database::new();
@@ -2046,16 +2119,33 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         db.save(&mut file, keepass::DatabaseKey::new().with_password("pw"))
             .unwrap();
+        (dir, path)
+    }
 
+    #[test]
+    fn unlocking_can_be_cancelled() {
+        let (_dir, path) = vault_file(|_| {});
         let mut app = App::new(Some(path), None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
         st.password.set_text("pw");
-        st.working = true;
+        app.on_key(key(KeyCode::Enter));
+        app.on_tick(); // starts the worker
+        app.on_key(key(KeyCode::Char('x'))); // ignored while unlocking
+        app.on_key(key(KeyCode::Esc));
+        let Screen::Unlock(st) = &app.screen else {
+            panic!("expected the unlock screen");
+        };
+        assert!(!st.working);
+        assert_eq!(st.error.as_deref(), Some("unlocking cancelled"));
+        assert_eq!(st.password.text.as_str(), "pw");
+
+        // Whatever the worker produces is discarded.
+        std::thread::sleep(Duration::from_millis(300));
         app.on_tick();
-        assert!(matches!(app.screen, Screen::Browser), "unlock failed");
-        (dir, app)
+        assert!(matches!(app.screen, Screen::Unlock(_)));
+        assert!(app.vault.is_none());
     }
 
     /// An unlocked app that locks after a minute idle, with two entries.
@@ -2083,7 +2173,7 @@ mod tests {
         };
         st.password.set_text(password);
         app.on_key(key(KeyCode::Enter));
-        app.on_tick();
+        finish_unlock(app);
     }
 
     fn screen_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
