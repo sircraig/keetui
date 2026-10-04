@@ -1,18 +1,18 @@
 //! The unlock and new-database screens.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{
-    App, CreateState, Hit, TextField, UnlockState, CREATE_FIELD_LABELS, C_CONFIRM, C_KEYFILE,
-    C_PASS,
+    App, C_CONFIRM, C_KEYFILE, C_PASS, CREATE_FIELD_LABELS, CreateState, Hit, TextField,
+    UnlockState,
 };
 
-use super::{btn, buttons, centered, hit, mask, scroll_window, truncate, ACCENT, DIM, ERR, OK};
+use super::{ACCENT, DIM, ERR, OK, btn, buttons, centered, hit, mask, scroll_window, truncate};
 
 const LABEL_W: u16 = 11;
 
@@ -75,9 +75,29 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
     );
 
     let pw_chars: Vec<char> = mask(st.password.text.chars().count()).chars().collect();
-    let pw_cursor = input_row(frame, app, row(3), 0, "Password", &pw_chars, &st.password, !st.focus_keyfile, None);
+    let pw_cursor = input_row(
+        frame,
+        app,
+        row(3),
+        0,
+        "Password",
+        &pw_chars,
+        &st.password,
+        !st.focus_keyfile,
+        None,
+    );
     let kf_chars: Vec<char> = st.keyfile.text.chars().collect();
-    let kf_cursor = input_row(frame, app, row(4), 1, "Key file", &kf_chars, &st.keyfile, st.focus_keyfile, Some("optional"));
+    let kf_cursor = input_row(
+        frame,
+        app,
+        row(4),
+        1,
+        "Key file",
+        &kf_chars,
+        &st.keyfile,
+        st.focus_keyfile,
+        Some("optional"),
+    );
 
     frame.render_widget(message(st.working, "Unlocking…", st.error.as_ref()), row(6));
 
@@ -89,14 +109,22 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
         inner.right(),
         vec![
             btn("⏎", "unlock", key(KeyCode::Enter, KeyModifiers::NONE)),
-            btn("^o", "open other", key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            btn(
+                "^o",
+                "open other",
+                key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            ),
             btn("^n", "new", key(KeyCode::Char('n'), KeyModifiers::CONTROL)),
             btn("esc", "quit", key(KeyCode::Esc, KeyModifiers::NONE)),
         ],
     );
 
     if !st.working {
-        frame.set_cursor_position(if st.focus_keyfile { kf_cursor } else { pw_cursor });
+        frame.set_cursor_position(if st.focus_keyfile {
+            kf_cursor
+        } else {
+            pw_cursor
+        });
     }
 }
 
@@ -122,14 +150,28 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
         };
         let placeholder = (i == C_KEYFILE).then_some("optional");
         let r = row(2 + i as u16);
-        let p = input_row(frame, app, r, i, label, &chars, field, st.focus == i, placeholder);
+        let p = input_row(
+            frame,
+            app,
+            r,
+            i,
+            label,
+            &chars,
+            field,
+            st.focus == i,
+            placeholder,
+        );
         if st.focus == i {
             cursor = Some(p);
         }
         // Live feedback on whether the confirmation matches.
         if i == C_CONFIRM && !field.text.is_empty() {
             let ok = st.fields[C_PASS].text == field.text;
-            let (mark, color) = if ok { ("✓ match", OK) } else { ("✗ differs", ERR) };
+            let (mark, color) = if ok {
+                ("✓ match", OK)
+            } else {
+                ("✗ differs", ERR)
+            };
             let w = mark.chars().count() as u16;
             if r.width > LABEL_W + w + 8 {
                 frame.render_widget(
@@ -145,9 +187,19 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
     } else {
         message(st.working, "Creating…", st.error.as_ref())
     };
-    frame.render_widget(msg, Rect { height: 2, ..row(7) });
+    frame.render_widget(
+        msg,
+        Rect {
+            height: 2,
+            ..row(7)
+        },
+    );
 
-    let back = if app.db_path.is_file() { "back" } else { "quit" };
+    let back = if app.db_path.is_file() {
+        "back"
+    } else {
+        "quit"
+    };
     buttons(
         frame,
         app,
@@ -156,7 +208,11 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
         inner.right(),
         vec![
             btn("⏎", "create", key(KeyCode::Enter, KeyModifiers::NONE)),
-            btn("^r", if st.reveal { "hide" } else { "show" }, key(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            btn(
+                "^r",
+                if st.reveal { "hide" } else { "show" },
+                key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            ),
             btn("esc", back, key(KeyCode::Esc, KeyModifiers::NONE)),
         ],
     );
@@ -182,7 +238,10 @@ fn input_row(
 ) -> Position {
     hit(app, row, Hit::LoginField(index));
     let label = if focused {
-        Line::from(vec![Span::raw("▌").fg(ACCENT), Span::raw(label.to_string()).fg(ACCENT).bold()])
+        Line::from(vec![
+            Span::raw("▌").fg(ACCENT),
+            Span::raw(label.to_string()).fg(ACCENT).bold(),
+        ])
     } else {
         Line::from(vec![Span::raw(" "), Span::raw(label.to_string()).fg(DIM)])
     };

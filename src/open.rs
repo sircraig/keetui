@@ -5,7 +5,7 @@
 
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 const ALLOWED_SCHEMES: [&str; 5] = ["http", "https", "ftp", "sftp", "mailto"];
 
@@ -79,7 +79,10 @@ mod tests {
     fn normalizes_urls() {
         assert_eq!(normalize_url("https://x.com/a").unwrap(), "https://x.com/a");
         assert_eq!(normalize_url("github.com").unwrap(), "https://github.com");
-        assert_eq!(normalize_url(" example.com:8443/x ").unwrap(), "https://example.com:8443/x");
+        assert_eq!(
+            normalize_url(" example.com:8443/x ").unwrap(),
+            "https://example.com:8443/x"
+        );
         assert_eq!(normalize_url("mailto:a@b.c").unwrap(), "mailto:a@b.c");
         assert!(normalize_url("cmd://rm -rf ~").is_err());
         assert!(normalize_url("file:///etc/passwd").is_err());

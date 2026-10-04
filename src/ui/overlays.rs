@@ -1,13 +1,13 @@
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{App, ConfirmState, GenState, Hit, Overlay, PendingAction, Screen};
 
-use super::{btn, button, buttons, centered, hit, ACCENT, DIM, ERR, WARN};
+use super::{ACCENT, DIM, ERR, WARN, btn, button, buttons, centered, hit};
 
 fn key(code: KeyCode) -> Hit {
     Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -17,7 +17,13 @@ fn ch(c: char) -> Hit {
     key(KeyCode::Char(c))
 }
 
-fn modal(frame: &mut Frame, w: u16, h: u16, title: &'static str, color: ratatui::style::Color) -> Rect {
+fn modal(
+    frame: &mut Frame,
+    w: u16,
+    h: u16,
+    title: &'static str,
+    color: ratatui::style::Color,
+) -> Rect {
     let area = centered(w, h, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::bordered()
@@ -49,7 +55,10 @@ fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
     }
     frame.render_widget(
         Paragraph::new(cs.prompt.clone()).wrap(Wrap { trim: true }),
-        Rect { height: inner.height - 1, ..inner },
+        Rect {
+            height: inner.height - 1,
+            ..inner
+        },
     );
     let btns = match cs.pending {
         PendingAction::QuitDirty => vec![
@@ -61,10 +70,16 @@ fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
             vec![btn("y", "delete", ch('y')), btn("n", "cancel", ch('n'))]
         }
         PendingAction::DiscardForm => {
-            vec![btn("y", "discard", ch('y')), btn("n", "keep editing", ch('n'))]
+            vec![
+                btn("y", "discard", ch('y')),
+                btn("n", "keep editing", ch('n')),
+            ]
         }
         PendingAction::ConvertKdbx3 { .. } => {
-            vec![btn("y", "save as KDBX4", ch('y')), btn("n", "cancel", ch('n'))]
+            vec![
+                btn("y", "save as KDBX4", ch('y')),
+                btn("n", "cancel", ch('n')),
+            ]
         }
     };
     buttons(frame, app, inner.x, inner.bottom() - 1, inner.right(), btns);
@@ -83,7 +98,10 @@ fn draw_generator(frame: &mut Frame, app: &App, st: &GenState) {
     let mut x = r.x + 9;
     x += button(frame, app, x, r.y, "", "−", ch('-')) + 1;
     let len = format!("{:>3}", st.opts.length);
-    frame.render_widget(Paragraph::new(Span::raw(len.clone()).bold()), Rect::new(x, r.y, 3, 1));
+    frame.render_widget(
+        Paragraph::new(Span::raw(len.clone()).bold()),
+        Rect::new(x, r.y, 3, 1),
+    );
     x += 4;
     button(frame, app, x, r.y, "", "+", ch('+'));
 
@@ -131,7 +149,11 @@ fn draw_generator(frame: &mut Frame, app: &App, st: &GenState) {
         inner.bottom() - 1,
         inner.right(),
         vec![
-            btn("⏎", if editing { "use" } else { "copy" }, key(KeyCode::Enter)),
+            btn(
+                "⏎",
+                if editing { "use" } else { "copy" },
+                key(KeyCode::Enter),
+            ),
             btn("r", "regenerate", ch('r')),
             btn("esc", "close", key(KeyCode::Esc)),
         ],
@@ -197,7 +219,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw("Copied secrets clear from the clipboard after 15s. Press any key to close.").fg(DIM),
+        Span::raw("Copied secrets clear from the clipboard after 15s. Press any key to close.")
+            .fg(DIM),
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

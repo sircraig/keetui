@@ -269,11 +269,14 @@ impl PickerState {
 }
 
 pub fn is_kdbx(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("kdbx"))
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("kdbx"))
 }
 
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `~/x` style display of a path under the home directory.
@@ -314,7 +317,10 @@ mod tests {
     }
 
     fn names(st: &PickerState) -> Vec<String> {
-        st.visible().iter().map(|&i| st.items[i].name.clone()).collect()
+        st.visible()
+            .iter()
+            .map(|&i| st.items[i].name.clone())
+            .collect()
     }
 
     #[test]
@@ -330,7 +336,10 @@ mod tests {
         let dir = setup();
         let mut st = PickerState::new(dir.path(), None);
         st.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL), 10);
-        assert_eq!(names(&st), ["..", ".hidden", "vaults", "notes.txt", "Work.kdbx"]);
+        assert_eq!(
+            names(&st),
+            ["..", ".hidden", "vaults", "notes.txt", "Work.kdbx"]
+        );
     }
 
     #[test]

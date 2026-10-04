@@ -2,18 +2,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDateTime;
 use keepass::db::fields;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{App, Hit, Pane, Screen, StatusKind};
 use crate::event::Action;
 
 use super::{
-    btn, buttons, buttons_right, buttons_width, hit, hovered, key_bar, scroll_window, selection_style, truncate,
-    width, Btn, ACCENT, DIM, ERR, HIDDEN, OK, WARN,
+    ACCENT, Btn, DIM, ERR, HIDDEN, OK, WARN, btn, buttons, buttons_right, buttons_width, hit,
+    hovered, key_bar, scroll_window, selection_style, truncate, width,
 };
 
 const LABEL_W: u16 = 10;
@@ -85,10 +85,7 @@ fn draw_groups(frame: &mut Frame, app: &App, area: Rect) {
                 "▸ "
             };
             let name = if g.name.is_empty() { "(root)" } else { &g.name };
-            let mut spans = vec![
-                Span::raw("  ".repeat(*depth)),
-                Span::raw(marker).fg(DIM),
-            ];
+            let mut spans = vec![Span::raw("  ".repeat(*depth)), Span::raw(marker).fg(DIM)];
             if Some(*id) == bin {
                 spans.push(Span::raw(format!("🗑 {name}")).fg(DIM));
             } else {
@@ -143,7 +140,13 @@ fn draw_entries(frame: &mut Frame, app: &App, area: Rect) {
         let name = app
             .sel_group
             .and_then(|g| v.db.group(g))
-            .map(|g| if g.name.is_empty() { "(root)".to_string() } else { g.name.clone() })
+            .map(|g| {
+                if g.name.is_empty() {
+                    "(root)".to_string()
+                } else {
+                    g.name.clone()
+                }
+            })
             .unwrap_or_default();
         format!(" {name} · {n} ")
     };
@@ -212,7 +215,10 @@ fn draw_entries(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let selected = app.entry_rows.iter().position(|e| Some(*e) == app.sel_entry);
+    let selected = app
+        .entry_rows
+        .iter()
+        .position(|e| Some(*e) == app.sel_entry);
     let mut state = ListState::default()
         .with_offset(app.entry_offset.get())
         .with_selected(selected);
@@ -250,11 +256,20 @@ fn draw_search_box(frame: &mut Frame, app: &App, area: Rect) {
                 if chars.is_empty() {
                     frame.render_widget(
                         Paragraph::new(Span::raw("title, user, URL, notes, tags…").fg(DIM)),
-                        Rect { x: area.x + prompt_w, width: area.width.saturating_sub(prompt_w), ..area },
+                        Rect {
+                            x: area.x + prompt_w,
+                            width: area.width.saturating_sub(prompt_w),
+                            ..area
+                        },
                     );
                 }
             } else {
-                buttons_right(frame, app, area, vec![btn("esc", "clear", Hit::Act(Action::Escape))]);
+                buttons_right(
+                    frame,
+                    app,
+                    area,
+                    vec![btn("esc", "clear", Hit::Act(Action::Escape))],
+                );
             }
         }
         None => {
@@ -284,7 +299,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let Some(e) = entry else {
-        frame.render_widget(Paragraph::new(Span::raw("No entry selected.").fg(DIM)), inner);
+        frame.render_widget(
+            Paragraph::new(Span::raw("No entry selected.").fg(DIM)),
+            inner,
+        );
         return;
     };
     if inner.height == 0 {
@@ -297,7 +315,11 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
 
     // Location and entry-level actions.
     let path = v.group_path(e.parent().id());
-    let path = if path.is_empty() { "(root)".to_string() } else { path };
+    let path = if path.is_empty() {
+        "(root)".to_string()
+    } else {
+        path
+    };
     let bx = buttons_right(
         frame,
         app,
@@ -309,22 +331,48 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     );
     let path_w = bx.saturating_sub(inner.x + 1) as usize;
     frame.render_widget(
-        Paragraph::new(Span::raw(truncate(&format!("in {path}"), path_w)).fg(DIM).italic()),
+        Paragraph::new(
+            Span::raw(truncate(&format!("in {path}"), path_w))
+                .fg(DIM)
+                .italic(),
+        ),
         row(y),
     );
     y += 2;
 
-    let mut field = |label: &str, text: String, style: Style, suffix: Vec<Span<'static>>, value_hit: Option<Hit>, btns: Vec<Btn>| {
+    let mut field = |label: &str,
+                     text: String,
+                     style: Style,
+                     suffix: Vec<Span<'static>>,
+                     value_hit: Option<Hit>,
+                     btns: Vec<Btn>| {
         if y >= bottom {
             return;
         }
-        field_row(frame, app, row(y), label, text, style, suffix, value_hit, btns);
+        field_row(
+            frame,
+            app,
+            row(y),
+            label,
+            text,
+            style,
+            suffix,
+            value_hit,
+            btns,
+        );
         y += 1;
     };
 
     let user = e.get_username().unwrap_or("");
     if user.is_empty() {
-        field("Username", "—".into(), Style::new().fg(DIM), vec![], None, vec![]);
+        field(
+            "Username",
+            "—".into(),
+            Style::new().fg(DIM),
+            vec![],
+            None,
+            vec![],
+        );
     } else {
         field(
             "Username",
@@ -338,7 +386,14 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
 
     let pw = e.get_password().unwrap_or("");
     if pw.is_empty() {
-        field("Password", "—".into(), Style::new().fg(DIM), vec![], None, vec![]);
+        field(
+            "Password",
+            "—".into(),
+            Style::new().fg(DIM),
+            vec![],
+            None,
+            vec![],
+        );
     } else {
         let (shown, style) = if app.reveal {
             (pw.to_string(), Style::new().fg(WARN))
@@ -352,7 +407,11 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             vec![],
             Some(Hit::EntryAct(Action::CopyPass)),
             vec![
-                btn("r", if app.reveal { "hide" } else { "show" }, Hit::EntryAct(Action::ToggleReveal)),
+                btn(
+                    "r",
+                    if app.reveal { "hide" } else { "show" },
+                    Hit::EntryAct(Action::ToggleReveal),
+                ),
                 btn("c", "copy", Hit::EntryAct(Action::CopyPass)),
             ],
         );
@@ -360,7 +419,14 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
 
     let url = e.get_url().unwrap_or("");
     if url.is_empty() {
-        field("URL", "—".into(), Style::new().fg(DIM), vec![], None, vec![]);
+        field(
+            "URL",
+            "—".into(),
+            Style::new().fg(DIM),
+            vec![],
+            None,
+            vec![],
+        );
     } else {
         field(
             "URL",
@@ -401,8 +467,22 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
                     vec![btn("t", "copy", Hit::EntryAct(Action::CopyOtp))],
                 );
             }
-            Ok(Err(_)) => field("TOTP", "clock error".into(), Style::new().fg(ERR), vec![], None, vec![]),
-            Err(_) => field("TOTP", "invalid OTP data".into(), Style::new().fg(ERR), vec![], None, vec![]),
+            Ok(Err(_)) => field(
+                "TOTP",
+                "clock error".into(),
+                Style::new().fg(ERR),
+                vec![],
+                None,
+                vec![],
+            ),
+            Err(_) => field(
+                "TOTP",
+                "invalid OTP data".into(),
+                Style::new().fg(ERR),
+                vec![],
+                None,
+                vec![],
+            ),
         }
     }
 
@@ -430,16 +510,35 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     if !e.tags.is_empty() {
-        field("Tags", e.tags.join(", "), Style::new().fg(ACCENT), vec![], None, vec![]);
+        field(
+            "Tags",
+            e.tags.join(", "),
+            Style::new().fg(ACCENT),
+            vec![],
+            None,
+            vec![],
+        );
     }
     let attachments: Vec<&str> = e.attachments_named().map(|(name, _)| name).collect();
     if !attachments.is_empty() {
-        field("Files", attachments.join(", "), Style::new(), vec![], None, vec![]);
+        field(
+            "Files",
+            attachments.join(", "),
+            Style::new(),
+            vec![],
+            None,
+            vec![],
+        );
     }
 
     // Footer: timestamps and expiry, pinned to the bottom.
     let footer_y = bottom.saturating_sub(1);
-    let footer = footer_line(e.times.expires, e.times.expiry, e.times.last_modification, e.times.creation);
+    let footer = footer_line(
+        e.times.expires,
+        e.times.expiry,
+        e.times.last_modification,
+        e.times.creation,
+    );
     if footer_y > y {
         frame.render_widget(Paragraph::new(footer), row(footer_y));
     }
@@ -450,7 +549,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Paragraph::new(Span::raw("Notes").fg(DIM)), row(y));
         y += 1;
         let notes_area = Rect::new(inner.x, y, inner.width, footer_y.saturating_sub(y + 1));
-        frame.render_widget(Paragraph::new(notes.to_string()).wrap(Wrap { trim: false }), notes_area);
+        frame.render_widget(
+            Paragraph::new(notes.to_string()).wrap(Wrap { trim: false }),
+            notes_area,
+        );
     }
 }
 
@@ -468,7 +570,10 @@ fn field_row(
 ) {
     frame.render_widget(
         Paragraph::new(Span::raw(label.to_string()).fg(DIM)),
-        Rect { width: LABEL_W.min(area.width), ..area },
+        Rect {
+            width: LABEL_W.min(area.width),
+            ..area
+        },
     );
     let value_x = area.x + LABEL_W;
     if value_x >= area.right() {
@@ -484,11 +589,23 @@ fn field_row(
     let bx = buttons_right(frame, app, after_label, btns);
     let value_w = bx.saturating_sub(value_x + 1);
     let suffix_w: u16 = suffix.iter().map(|s| width(&s.content)).sum();
-    let text_w = if suffix_w + 4 <= value_w { value_w - suffix_w } else { value_w };
+    let text_w = if suffix_w + 4 <= value_w {
+        value_w - suffix_w
+    } else {
+        value_w
+    };
     let text = truncate(&text, text_w as usize);
     let value_rect = Rect::new(value_x, area.y, value_w, 1);
     let mut style = style;
-    if value_hit.is_some() && hovered(app, Rect { width: width(&text), ..value_rect }) {
+    if value_hit.is_some()
+        && hovered(
+            app,
+            Rect {
+                width: width(&text),
+                ..value_rect
+            },
+        )
+    {
         style = style.underlined();
     }
     let mut spans = vec![Span::styled(text.clone(), style)];
@@ -497,7 +614,14 @@ fn field_row(
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), value_rect);
     if let Some(h) = value_hit {
-        hit(app, Rect { width: width(&text).min(value_w), ..value_rect }, h);
+        hit(
+            app,
+            Rect {
+                width: width(&text).min(value_w),
+                ..value_rect
+            },
+            h,
+        );
     }
 }
 
@@ -551,7 +675,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         .countdown()
         .map(|(label, secs)| format!("⧉ {label} in clipboard · clears in {secs}s "))
         .unwrap_or_default();
-    let [l, r] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width(&right))]).areas(area);
+    let [l, r] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(width(&right))]).areas(area);
     frame.render_widget(Paragraph::new(Span::raw(right).fg(WARN)), r);
 
     let name = format!(" {}", v.file_name());
@@ -602,7 +727,9 @@ fn draw_keys(frame: &mut Frame, app: &App, area: Rect) {
         if e.as_ref().is_some_and(|e| e.get_raw_otp_value().is_some()) {
             items.push(btn("t", "copy TOTP", act(Action::CopyOtp)));
         }
-        if e.as_ref().is_some_and(|e| e.get_url().is_some_and(|u| !u.is_empty())) {
+        if e.as_ref()
+            .is_some_and(|e| e.get_url().is_some_and(|u| !u.is_empty()))
+        {
             items.push(btn("o", "open URL", act(Action::OpenUrl)));
         }
         if e.is_some() {

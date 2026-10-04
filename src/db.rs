@@ -5,11 +5,11 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use keepass::{
-    config::{DatabaseConfig, DatabaseVersion, KdfConfig},
-    db::{fields, DatabaseOpenError, EntryId, GroupId},
     Database, DatabaseKey,
+    config::{DatabaseConfig, DatabaseVersion, KdfConfig},
+    db::{DatabaseOpenError, EntryId, GroupId, fields},
 };
 
 pub struct Vault {
@@ -77,8 +77,9 @@ impl Vault {
             .context("failed to serialize database")?;
 
         // Verify the output reopens before touching the file on disk.
-        Database::parse(&buf, self.key.clone())
-            .map_err(|e| anyhow!("verification of saved data failed ({e}); original file untouched"))?;
+        Database::parse(&buf, self.key.clone()).map_err(|e| {
+            anyhow!("verification of saved data failed ({e}); original file untouched")
+        })?;
 
         if self.path.is_file() {
             let bak = backup_path(&self.path);
@@ -187,7 +188,8 @@ fn build_key(password: &str, keyfile: Option<&Path>) -> Result<DatabaseKey> {
         key = key.with_password(password);
     }
     if let Some(kf) = keyfile {
-        let kf_data = fs::read(kf).with_context(|| format!("cannot read key file {}", kf.display()))?;
+        let kf_data =
+            fs::read(kf).with_context(|| format!("cannot read key file {}", kf.display()))?;
         key = key.with_keyfile(&mut kf_data.as_slice())?;
     }
     if key.is_empty() {
@@ -232,7 +234,10 @@ mod tests {
         let path = dir.path().join("Fresh.kdbx");
         let vault = Vault::create(&path, "pw", None).unwrap();
         assert_eq!(vault.db.root().name, "Fresh");
-        assert!(Vault::create(&path, "pw", None).is_err(), "must not overwrite");
+        assert!(
+            Vault::create(&path, "pw", None).is_err(),
+            "must not overwrite"
+        );
         assert!(!dir.path().join("Fresh.kdbx.bak").exists());
 
         let reopened = Vault::open(&path, "pw", None).unwrap();

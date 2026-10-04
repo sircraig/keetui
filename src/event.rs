@@ -98,16 +98,28 @@ mod tests {
     fn maps_basic_navigation() {
         assert_eq!(browser_action(key(KeyCode::Char('j'))), Some(Action::Down));
         assert_eq!(browser_action(key(KeyCode::Char('k'))), Some(Action::Up));
-        assert_eq!(browser_action(key(KeyCode::Char('/'))), Some(Action::Search));
+        assert_eq!(
+            browser_action(key(KeyCode::Char('/'))),
+            Some(Action::Search)
+        );
         assert_eq!(browser_action(key(KeyCode::Char('q'))), Some(Action::Quit));
     }
 
     #[test]
     fn maps_copy_and_open() {
-        assert_eq!(browser_action(key(KeyCode::Char('c'))), Some(Action::CopyPass));
-        assert_eq!(browser_action(key(KeyCode::Char('p'))), Some(Action::CopyPass));
+        assert_eq!(
+            browser_action(key(KeyCode::Char('c'))),
+            Some(Action::CopyPass)
+        );
+        assert_eq!(
+            browser_action(key(KeyCode::Char('p'))),
+            Some(Action::CopyPass)
+        );
         assert_eq!(browser_action(key(KeyCode::Enter)), Some(Action::Activate));
-        assert_eq!(browser_action(key(KeyCode::Char('o'))), Some(Action::OpenUrl));
+        assert_eq!(
+            browser_action(key(KeyCode::Char('o'))),
+            Some(Action::OpenUrl)
+        );
     }
 
     #[test]

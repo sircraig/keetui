@@ -6,7 +6,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use keepass::db::{fields, EntryId, GroupId};
+use keepass::db::{EntryId, GroupId, fields};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::clipboard::{Clipboard, DEFAULT_TTL};
 use crate::db::Vault;
-use crate::event::{browser_action, Action};
+use crate::event::{Action, browser_action};
 use crate::generator::{self, GenOpts, MAX_LENGTH, MIN_LENGTH};
 use crate::picker::{self, PickerState};
 use crate::{open, totp};
@@ -176,7 +176,10 @@ impl CreateState {
         }
         let path = self.path();
         if path.exists() {
-            return Err(format!("{} already exists — choose another name", path.display()));
+            return Err(format!(
+                "{} already exists — choose another name",
+                path.display()
+            ));
         }
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
             && !dir.is_dir()
@@ -209,7 +212,10 @@ fn expand_home(s: &str) -> PathBuf {
 
 fn resolve_db_path(s: &str) -> PathBuf {
     let mut path = expand_home(s.trim());
-    if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("kdbx")) {
+    if path
+        .extension()
+        .is_none_or(|e| !e.eq_ignore_ascii_case("kdbx"))
+    {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".kdbx");
         path.set_file_name(name);
@@ -580,7 +586,11 @@ impl App {
                 self.screen = Screen::Picker(PickerState::new(&self.db_dir(), Some(&self.db_path)));
             }
             KeyCode::Char('u') if ctrl => {
-                let field = if st.focus_keyfile { &mut st.keyfile } else { &mut st.password };
+                let field = if st.focus_keyfile {
+                    &mut st.keyfile
+                } else {
+                    &mut st.password
+                };
                 field.clear();
             }
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
@@ -688,7 +698,11 @@ impl App {
                 if self.db_path.is_file() {
                     self.screen = Screen::Unlock(UnlockState::new(&self.keyfile_arg));
                 } else {
-                    let dir = st.path().parent().filter(|d| d.is_dir()).map(Path::to_path_buf);
+                    let dir = st
+                        .path()
+                        .parent()
+                        .filter(|d| d.is_dir())
+                        .map(Path::to_path_buf);
                     let dir = dir.unwrap_or_else(|| PathBuf::from("."));
                     self.screen = Screen::Picker(PickerState::new(&dir, None));
                 }
@@ -736,7 +750,9 @@ impl App {
                 self.vault = Some(vault);
                 self.screen = Screen::Browser;
                 self.init_after_unlock();
-                self.set_status(format!("✓ created {name} — press a to add your first entry"));
+                self.set_status(format!(
+                    "✓ created {name} — press a to add your first entry"
+                ));
             }
             Err(e) => {
                 if let Screen::Create(st) = &mut self.screen {
@@ -749,12 +765,11 @@ impl App {
     fn init_after_unlock(&mut self) {
         let Some(v) = &self.vault else { return };
         let root = v.db.root().id();
-        self.expanded = v
-            .db
-            .iter_all_groups()
-            .filter(|g| g.is_expanded)
-            .map(|g| g.id())
-            .collect();
+        self.expanded =
+            v.db.iter_all_groups()
+                .filter(|g| g.is_expanded)
+                .map(|g| g.id())
+                .collect();
         self.expanded.insert(root);
         self.sel_group = Some(root);
         self.rebuild();
@@ -1098,10 +1113,10 @@ impl App {
         let info = {
             let Some(v) = &self.vault else { return };
             match target {
-                Some(id) => v
-                    .db
-                    .group(id)
-                    .map(|g| (g.name.clone(), g.parent().map(|p| p.id()).unwrap_or(id))),
+                Some(id) => {
+                    v.db.group(id)
+                        .map(|g| (g.name.clone(), g.parent().map(|p| p.id()).unwrap_or(id)))
+                }
                 None => self.sel_group.map(|p| (String::new(), p)),
             }
         };
@@ -1198,7 +1213,8 @@ impl App {
         let url = form.fields[F_URL].text.to_string();
         let otp_raw = Zeroizing::new(form.fields[F_OTP].text.trim().to_string());
         let notes = form.fields[F_NOTES].text.to_string();
-        let otp = (!otp_raw.is_empty()).then(|| Zeroizing::new(totp::normalize_otp(&otp_raw, &title)));
+        let otp =
+            (!otp_raw.is_empty()).then(|| Zeroizing::new(totp::normalize_otp(&otp_raw, &title)));
 
         let id = match form.target {
             Some(id) => Some(id),
@@ -1209,7 +1225,9 @@ impl App {
             return;
         };
         let Some(v) = &mut self.vault else { return };
-        let Some(mut e) = v.db.entry_mut(id) else { return };
+        let Some(mut e) = v.db.entry_mut(id) else {
+            return;
+        };
 
         if form.target.is_some() {
             // Record the previous state in entry history, like KeePassXC does.
@@ -1243,7 +1261,11 @@ impl App {
         self.sel_entry = Some(id);
         self.pane = Pane::Entries;
         self.rebuild();
-        let verb = if form.target.is_some() { "updated" } else { "created" };
+        let verb = if form.target.is_some() {
+            "updated"
+        } else {
+            "created"
+        };
         self.set_status(format!("entry {verb} — Ctrl-s to save to disk"));
     }
 
@@ -1277,7 +1299,8 @@ impl App {
     }
 
     fn commit_group_form(&mut self) {
-        let name_ok = matches!(&self.screen, Screen::GroupEdit(f) if !f.name.text.trim().is_empty());
+        let name_ok =
+            matches!(&self.screen, Screen::GroupEdit(f) if !f.name.text.trim().is_empty());
         if !name_ok {
             self.set_error("group name must not be empty");
             return;
@@ -1345,7 +1368,9 @@ impl App {
                     let prompt = if self.group_goes_to_bin(id) {
                         format!("Move group '{name}' and its contents to the recycle bin?")
                     } else {
-                        format!("Permanently delete group '{name}' and everything in it? This cannot be undone.")
+                        format!(
+                            "Permanently delete group '{name}' and everything in it? This cannot be undone."
+                        )
                     };
                     Ok(ConfirmState {
                         prompt,
@@ -1392,7 +1417,9 @@ impl App {
         let to_bin = self.entry_goes_to_bin(id).then(|| self.bin_id()).flatten();
         let res = {
             let Some(v) = &mut self.vault else { return };
-            let Some(mut e) = v.db.entry_mut(id) else { return };
+            let Some(mut e) = v.db.entry_mut(id) else {
+                return;
+            };
             match to_bin {
                 Some(bin) => e
                     .move_to(bin)
@@ -1416,7 +1443,9 @@ impl App {
         let to_bin = self.group_goes_to_bin(id).then(|| self.bin_id()).flatten();
         let res = {
             let Some(v) = &mut self.vault else { return };
-            let Some(mut g) = v.db.group_mut(id) else { return };
+            let Some(mut g) = v.db.group_mut(id) else {
+                return;
+            };
             match to_bin {
                 Some(bin) => g
                     .move_to(bin)
@@ -1627,11 +1656,7 @@ impl App {
             }
         };
 
-        if !self
-            .entry_rows
-            .iter()
-            .any(|e| Some(*e) == self.sel_entry)
-        {
+        if !self.entry_rows.iter().any(|e| Some(*e) == self.sel_entry) {
             self.sel_entry = self.entry_rows.first().copied();
         }
         if self.sel_entry != prev_entry {
@@ -1673,8 +1698,18 @@ fn edit_field(field: &mut TextField, key: KeyEvent) -> bool {
 /// column where possible. Returns false at the first/last line.
 fn notes_vertical(field: &mut TextField, up: bool) -> bool {
     let chars: Vec<char> = field.text.chars().collect();
-    let line_start = |i: usize| chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
-    let line_end = |i: usize| chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
+    let line_start = |i: usize| {
+        chars[..i]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |p| p + 1)
+    };
+    let line_end = |i: usize| {
+        chars[i..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |p| i + p)
+    };
     let start = line_start(field.cursor);
     let col = field.cursor - start;
     if up {
@@ -1698,7 +1733,9 @@ fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
         return 0;
     }
-    (idx as isize).saturating_add(delta).clamp(0, len as isize - 1) as usize
+    (idx as isize)
+        .saturating_add(delta)
+        .clamp(0, len as isize - 1) as usize
 }
 
 #[cfg(test)]

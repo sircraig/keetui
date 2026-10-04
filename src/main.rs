@@ -12,7 +12,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use ratatui::crossterm::event::{
     self as cevent, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,

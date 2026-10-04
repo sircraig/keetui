@@ -5,7 +5,9 @@ use keepass::{Database, DatabaseKey};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: make_test_db <out.kdbx> [password]");
+    let path = args
+        .next()
+        .expect("usage: make_test_db <out.kdbx> [password]");
     let password = args.next().unwrap_or_else(|| "test".to_string());
 
     let mut db = Database::new();
