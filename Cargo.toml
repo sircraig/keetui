@@ -1,0 +1,21 @@
+[package]
+name = "keetui"
+version = "0.1.0"
+edition = "2024"
+description = "A KeePass-compatible TUI password manager"
+license = "MIT"
+repository = "https://github.com/sircraig/keetui"
+
+[dependencies]
+ratatui = "0.30"
+keepass = { version = "0.15.0", features = ["save_kdbx4", "totp"] }
+clap = { version = "4", features = ["derive"] }
+zeroize = "1"
+rand = "0.9"
+anyhow = "1"
+tempfile = "3"
+chrono = { version = "0.4", default-features = false }
+
+[profile.release]
+strip = true
+lto = true
