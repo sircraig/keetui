@@ -23,6 +23,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+use zeroize::Zeroizing;
 
 use crate::clipboard::Clipboard;
 
@@ -175,6 +176,8 @@ fn run(
                     redraw = true;
                 }
                 Event::Paste(text) => {
+                    // Possibly a password; wipe it once handled.
+                    let text = Zeroizing::new(text);
                     app.on_paste(&text);
                     redraw = true;
                 }

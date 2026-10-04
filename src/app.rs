@@ -551,7 +551,10 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
-        let line: String = text.chars().filter(|c| !c.is_control()).collect();
+        // A paste may well be a password: build what gets inserted in a
+        // zeroizing buffer, sized up front so it never reallocates.
+        let mut line = Zeroizing::new(String::with_capacity(text.len()));
+        line.extend(text.chars().filter(|c| !c.is_control()));
         if matches!(self.screen, Screen::Browser) {
             if self.search_input {
                 self.edit_search(|q| q.push_str(&line));
@@ -2034,13 +2037,23 @@ fn spawn_unlock(
 }
 
 /// Pasted text for a multi-line field: line breaks normalized to `\n`,
-/// other control characters dropped.
-fn multiline(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .chars()
-        .filter(|&c| c == '\n' || !c.is_control())
-        .collect()
+/// other control characters dropped. Never longer than the input, so the
+/// zeroizing buffer is sized once.
+fn multiline(text: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(text.len()));
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                out.push('\n');
+            }
+            '\n' => out.push('\n'),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// "5 minutes" style rendering of a lock timeout.
@@ -2289,6 +2302,15 @@ mod tests {
         assert_eq!(form.fields[F_TITLE].text.as_str(), "Titlewithtabs");
         assert_eq!(form.fields[F_NOTES].text.as_str(), "one\ntwo[31m");
         assert!(form.modified);
+    }
+
+    #[test]
+    fn multiline_paste_normalizes_line_breaks() {
+        let input = "a\r\nb\rc\nd\x07\t";
+        let text = multiline(input);
+        assert_eq!(text.as_str(), "a\nb\nc\nd");
+        assert_eq!(text.capacity(), input.len(), "sized once, never grown");
+        assert_eq!(multiline("\r\n\r\n").as_str(), "\n\n");
     }
 
     #[test]
