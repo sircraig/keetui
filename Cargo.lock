@@ -1126,12 +1126,17 @@ name = "keetui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base32",
  "chrono",
  "clap",
+ "form_urlencoded",
+ "hmac 0.12.1",
  "keepass",
  "rand 0.9.5",
  "ratatui",
  "rustix",
+ "sha1",
+ "sha2 0.10.9",
  "signal-hook",
  "tempfile",
  "zeroize",
