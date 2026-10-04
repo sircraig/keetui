@@ -14,5 +14,7 @@ if [[ $# -gt 0 && $1 != -* ]]; then
     shift
 fi
 
-cargo build --release --quiet
+# --locked: never silently re-resolve dependencies into the binary that
+# handles your vault; update Cargo.lock deliberately instead.
+cargo build --release --quiet --locked
 exec ./target/release/keetui "$db" "$@"
