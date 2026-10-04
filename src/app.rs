@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use keepass::db::{EntryId, GroupId, fields};
+use keepass::db::{EntryId, GroupId, Times, fields};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -1621,7 +1621,8 @@ impl App {
             match form.target {
                 Some(id) => {
                     if let Some(mut g) = v.db.group_mut(id) {
-                        g.name = name;
+                        // Tracked, so merges see when it was renamed.
+                        g.edit_tracking(|g| g.name = name);
                     }
                 }
                 None => match v.db.group_mut(form.parent) {
@@ -1727,9 +1728,14 @@ impl App {
                 return;
             };
             match to_bin {
+                // Not the tracked move, which would also add a history item.
+                // Merges need the new location's timestamp.
                 Some(bin) => e
                     .move_to(bin)
-                    .map(|_| "entry moved to recycle bin")
+                    .map(|_| {
+                        e.times.location_changed = Some(Times::now());
+                        "entry moved to recycle bin"
+                    })
                     .map_err(|_| "failed to move entry to recycle bin"),
                 None => {
                     // Tracked, so the deletion is recorded in DeletedObjects
@@ -1755,7 +1761,9 @@ impl App {
                 return;
             };
             match to_bin {
+                // Tracked, so merges see when it moved.
                 Some(bin) => g
+                    .track_changes()
                     .move_to(bin)
                     .map(|_| "group moved to recycle bin")
                     .map_err(|_| "failed to move group to recycle bin"),
@@ -2559,6 +2567,77 @@ mod tests {
             change_password(&mut app, password);
         }
         assert_eq!(history_passwords(&app).len(), 3);
+    }
+
+    #[test]
+    fn moves_and_renames_update_their_timestamps() {
+        // Merges (KeePass, KeePassXC, keepass-rs) decide which side of a
+        // change wins by these timestamps.
+        let old = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let (_dir, mut app) = unlocked(move |db| {
+            let bin = {
+                let mut root = db.root_mut();
+                let mut bin = root.add_group();
+                bin.name = "Recycle Bin".into();
+                bin.id()
+            };
+            db.meta.recyclebin_enabled = Some(true);
+            db.meta.recyclebin_uuid = Some(bin.uuid());
+            db.root_mut().add_entry().edit(|e| {
+                e.set_unprotected(fields::TITLE, "E1");
+                e.times.location_changed = Some(old);
+            });
+            for name in ["G3", "G4"] {
+                let mut root = db.root_mut();
+                let mut group = root.add_group();
+                group.name = name.into();
+                group.times.location_changed = Some(old);
+                group.times.last_modification = Some(old);
+            }
+        });
+        let (e1, g3, g4) = {
+            let root = app.vault.as_ref().unwrap().db.root();
+            (
+                root.entry_by_name("E1").unwrap().id(),
+                root.group_by_name("G3").unwrap().id(),
+                root.group_by_name("G4").unwrap().id(),
+            )
+        };
+
+        // E1 to the recycle bin; rename G3; G4 to the recycle bin.
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        app.on_key(key(KeyCode::Tab));
+        app.select_group(g3);
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(ctrl('u'));
+        for c in "G3b".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        app.select_group(g4);
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+
+        let db = &app.vault.as_ref().unwrap().db;
+        let bin = db.recycle_bin().unwrap().id();
+        assert_eq!(db.entry(e1).unwrap().parent().id(), bin, "E1 moved");
+        assert_eq!(db.group(g3).unwrap().name, "G3b", "G3 renamed");
+        let mut stale = Vec::new();
+        if db.entry(e1).unwrap().times.location_changed == Some(old) {
+            stale.push("E1 location_changed");
+        }
+        if db.group(g3).unwrap().times.last_modification == Some(old) {
+            stale.push("G3 last_modification");
+        }
+        if db.group(g4).unwrap().times.location_changed == Some(old) {
+            stale.push("G4 location_changed");
+        }
+        assert!(stale.is_empty(), "not updated: {stale:?}");
     }
 
     #[test]
