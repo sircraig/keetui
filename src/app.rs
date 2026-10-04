@@ -218,6 +218,17 @@ impl CreateState {
         (!kf.is_empty()).then(|| expand_home(kf))
     }
 
+    /// Validate the form and, if it's fine, schedule the creation.
+    fn submit(&mut self) {
+        match self.validate() {
+            Ok(()) => {
+                self.error = None;
+                self.working = true;
+            }
+            Err(msg) => self.error = Some(msg),
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         let raw = self.fields[C_PATH].text.trim();
         if raw.is_empty() {
@@ -996,14 +1007,11 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Down => st.focus = (st.focus + 1) % 4,
             KeyCode::BackTab | KeyCode::Up => st.focus = (st.focus + 3) % 4,
+            // Enter moves on to the next field until there's nothing left to
+            // fill in; Ctrl-s (and the create button) creates from any field.
             KeyCode::Enter if st.focus < C_CONFIRM => st.focus += 1,
-            KeyCode::Enter => match st.validate() {
-                Ok(()) => {
-                    st.error = None;
-                    st.working = true;
-                }
-                Err(msg) => st.error = Some(msg),
-            },
+            KeyCode::Enter => st.submit(),
+            KeyCode::Char('s') if ctrl => st.submit(),
             _ => {
                 if edit_field(&mut st.fields[st.focus], key) {
                     st.error = None;
@@ -2934,6 +2942,50 @@ mod tests {
             .iter()
             .find_map(|(rect, hit)| matches!(hit, Hit::Act(Action::Save)).then_some(*rect));
         assert_eq!(save.map(|r| r.x), Some(marker));
+    }
+
+    #[test]
+    fn new_database_buttons_do_what_they_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(dir.path().join("new.kdbx")), None, None);
+        let Screen::Create(st) = &mut app.screen else {
+            panic!("expected the new-database screen");
+        };
+        st.fields[C_PASS].set_text("pw");
+        st.fields[C_CONFIRM].set_text("pw");
+        assert_eq!(st.focus, C_PASS);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let text = screen_text(&terminal);
+        let mut wrong = Vec::new();
+        // Esc goes back to the file picker; it doesn't quit.
+        if text.contains("[esc quit]") {
+            wrong.push("Esc is labelled quit");
+        }
+
+        // Clicking the create button creates, whichever field has focus.
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..24)
+            .find_map(|y| {
+                let row: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+                row.find("create]").map(|x| (x as u16, y))
+            })
+            .expect("create button drawn");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let Screen::Create(st) = &app.screen else {
+            panic!("expected the new-database screen");
+        };
+        if !st.working {
+            wrong.push("clicking create didn't start creating");
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
 
     #[test]

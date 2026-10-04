@@ -30,7 +30,8 @@ switch to a different database.
 
 Point keetui at a file that doesn't exist yet (`keetui ~/new.kdbx`), or press
 `Ctrl-n` on the unlock screen, to create an empty database. Choose the file
-name, enter the master password twice, and optionally add an existing key file.
+name, enter the master password twice, optionally add an existing key file, and
+press `Ctrl-s` (or `Enter` on the last fields) to create it.
 New databases are KDBX4 with Argon2d (64 MiB), and KeePassXC can open them.
 
 ### Browsing
