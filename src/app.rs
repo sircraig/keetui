@@ -1491,6 +1491,14 @@ impl App {
     }
 
     fn commit_entry_form(&mut self) {
+        // An existing entry that wasn't changed: just close the editor. A
+        // commit would add a history item, bump the modification time (which
+        // can make it win a merge against a real edit elsewhere) and mark
+        // the vault unsaved.
+        if matches!(&self.screen, Screen::EntryEdit(f) if f.target.is_some() && !f.modified) {
+            self.screen = Screen::Browser;
+            return;
+        }
         let otp = match &self.screen {
             Screen::EntryEdit(form) => self.otp_change(form),
             _ => return,
@@ -2705,6 +2713,31 @@ mod tests {
         let selected = v.db.entry(app.sel_entry.unwrap()).unwrap();
         assert_eq!(selected.get_title(), Some("Charlie"));
         assert!(!app.reveal, "the new entry's password is shown in clear");
+    }
+
+    #[test]
+    fn saving_an_unchanged_entry_records_nothing() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        let times = |app: &App| {
+            let v = app.vault.as_ref().unwrap();
+            v.db.entry(app.sel_entry.unwrap())
+                .unwrap()
+                .times
+                .last_modification
+        };
+        let before = times(&app);
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Char('e')));
+            app.on_key(ctrl('s'));
+            assert!(matches!(app.screen, Screen::Browser), "editor closed");
+        }
+        assert!(
+            history_passwords(&app).is_empty(),
+            "no-op saves added history"
+        );
+        assert!(!app.dirty, "no-op saves marked the vault unsaved");
+        assert_eq!(times(&app), before);
     }
 
     #[test]
