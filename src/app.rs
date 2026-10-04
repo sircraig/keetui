@@ -291,6 +291,15 @@ pub const F_OTP: usize = 4;
 pub const F_NOTES: usize = 5;
 pub const ENTRY_FIELD_LABELS: [&str; 6] = ["Title", "Username", "Password", "URL", "OTP", "Notes"];
 
+/// What saving the entry form does to the OTP field.
+enum OtpChange {
+    /// Untouched: keep the stored value exactly as it is, even if keetui
+    /// can't use it (it may be a format another client understands).
+    Keep,
+    Remove,
+    Set(Zeroizing<String>),
+}
+
 pub struct EntryForm {
     pub target: Option<EntryId>, // None = new entry
     pub group: GroupId,
@@ -1457,29 +1466,44 @@ impl App {
         }
     }
 
-    fn commit_entry_form(&mut self) {
-        // OTP settings that can't produce codes would only fail later (or,
-        // before validation existed, crash the detail pane): keep the form
-        // open on the OTP field instead.
-        let otp_error = match &self.screen {
-            Screen::EntryEdit(form) => {
-                let raw = form.fields[F_OTP].text.trim();
-                (!raw.is_empty())
-                    .then(|| {
-                        let otp = totp::normalize_otp(raw, &form.fields[F_TITLE].text);
-                        totp::parse(&otp).err()
-                    })
-                    .flatten()
-            }
-            _ => None,
-        };
-        if let Some(msg) = otp_error {
-            if let Screen::EntryEdit(form) = &mut self.screen {
-                form.focus = F_OTP;
-            }
-            self.set_error(msg);
-            return;
+    /// Work out what saving `form` does to the OTP field. Only a value the
+    /// user typed is normalized and validated; settings that can't produce
+    /// codes are refused then, rather than failing later.
+    fn otp_change(&self, form: &EntryForm) -> Result<OtpChange, String> {
+        let text = form.fields[F_OTP].text.as_str();
+        let unchanged = form
+            .target
+            .and_then(|id| self.vault.as_ref()?.db.entry(id))
+            .map_or(text.is_empty(), |e| {
+                e.get_raw_otp_value().unwrap_or("") == text
+            });
+        if unchanged {
+            return Ok(OtpChange::Keep);
         }
+        if text.trim().is_empty() {
+            return Ok(OtpChange::Remove);
+        }
+        let otp = totp::normalize_otp(text, &form.fields[F_TITLE].text);
+        totp::parse(&otp)?;
+        Ok(OtpChange::Set(otp))
+    }
+
+    fn commit_entry_form(&mut self) {
+        let otp = match &self.screen {
+            Screen::EntryEdit(form) => self.otp_change(form),
+            _ => return,
+        };
+        let otp = match otp {
+            Ok(otp) => otp,
+            Err(msg) => {
+                // Keep the form open on the OTP field.
+                if let Screen::EntryEdit(form) = &mut self.screen {
+                    form.focus = F_OTP;
+                }
+                self.set_error(msg);
+                return;
+            }
+        };
 
         let Screen::EntryEdit(form) = mem::replace(&mut self.screen, Screen::Browser) else {
             return;
@@ -1490,9 +1514,7 @@ impl App {
         let username = form.fields[F_USER].text.to_string();
         let password = Zeroizing::new(form.fields[F_PASS].text.to_string());
         let url = form.fields[F_URL].text.to_string();
-        let otp_raw = Zeroizing::new(form.fields[F_OTP].text.trim().to_string());
         let notes = form.fields[F_NOTES].text.to_string();
-        let otp = (!otp_raw.is_empty()).then(|| totp::normalize_otp(&otp_raw, &title));
 
         let id = match form.target {
             Some(id) => Some(id),
@@ -1515,8 +1537,12 @@ impl App {
                 e.set_protected(fields::PASSWORD, password.as_str());
                 e.set_unprotected(fields::URL, &url);
                 e.set_unprotected(fields::NOTES, &notes);
-                if let Some(otp) = &otp {
-                    e.set_protected(fields::OTP, otp.as_str());
+                match &otp {
+                    OtpChange::Keep => {}
+                    OtpChange::Remove => {
+                        e.fields.remove(fields::OTP);
+                    }
+                    OtpChange::Set(otp) => e.set_protected(fields::OTP, otp.as_str()),
                 }
             });
         } else {
@@ -1526,13 +1552,10 @@ impl App {
                 e.set_protected(fields::PASSWORD, password.as_str());
                 e.set_unprotected(fields::URL, &url);
                 e.set_unprotected(fields::NOTES, &notes);
-                if let Some(otp) = &otp {
+                if let OtpChange::Set(otp) = &otp {
                     e.set_protected(fields::OTP, otp.as_str());
                 }
             });
-        }
-        if otp.is_none() {
-            e.fields.remove(fields::OTP);
         }
 
         self.dirty = true;
@@ -2363,6 +2386,46 @@ mod tests {
         app.revealed_at = Instant::now().checked_sub(REVEAL_TTL).unwrap();
         app.on_tick();
         assert!(!app.reveal);
+    }
+
+    #[test]
+    fn saving_an_entry_leaves_an_untouched_otp_field_alone() {
+        // KeeOTP format (KeePass + KeeOtp; KeePassXC reads it) and a lowercase
+        // base32 secret (KeePassXC accepts it).
+        let mut failures = Vec::new();
+        for stored in [
+            "key=JBSWY3DPEHPK3PXP&size=8&step=60",
+            "otpauth://totp/x?secret=jbswy3dpehpk3pxp",
+        ] {
+            let (_dir, mut app) = unlocked(|db| {
+                db.root_mut().add_entry().edit(|e| {
+                    e.set_unprotected(fields::TITLE, "Site");
+                    e.set_protected(fields::OTP, stored);
+                });
+            });
+            app.on_key(key(KeyCode::Tab));
+            app.on_key(key(KeyCode::Char('e')));
+            let Screen::EntryEdit(form) = &mut app.screen else {
+                panic!("expected the entry editor");
+            };
+            // Change only the password.
+            form.focus = F_PASS;
+            app.on_key(key(KeyCode::Char('x')));
+            app.on_key(ctrl('s'));
+            if !matches!(app.screen, Screen::Browser) {
+                failures.push(format!("{stored}: saving the entry was refused"));
+                continue;
+            }
+            let v = app.vault.as_ref().unwrap();
+            let e = v.db.entry(app.sel_entry.unwrap()).unwrap();
+            if e.get_raw_otp_value() != Some(stored) {
+                failures.push(format!(
+                    "{stored}: rewritten to {:?}",
+                    e.get_raw_otp_value()
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]

@@ -32,7 +32,10 @@ pub fn parse(url: &str) -> Result<TOTP, String> {
 /// sized up front so no reallocation leaves the secret behind unwiped.
 pub fn normalize_otp(input: &str, title: &str) -> Zeroizing<String> {
     let trimmed = input.trim();
-    if trimmed.starts_with("otpauth://") {
+    if trimmed
+        .get(..10)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("otpauth://"))
+    {
         return Zeroizing::new(trimmed.to_string());
     }
     let mut secret = Zeroizing::new(String::with_capacity(trimmed.len()));
@@ -76,6 +79,9 @@ mod tests {
     #[test]
     fn passes_through_otpauth_urls() {
         let url = "otpauth://totp/x?secret=ABC&period=30";
+        assert_eq!(normalize_otp(url, "t").as_str(), url);
+        // The scheme is case-insensitive.
+        let url = "OTPAUTH://totp/x?secret=ABC";
         assert_eq!(normalize_otp(url, "t").as_str(), url);
     }
 
