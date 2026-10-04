@@ -27,8 +27,7 @@ fn modal_block(title: &'static str) -> Block<'static> {
 }
 
 pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
-    let area = frame.area();
-    let modal = centered(80, 22, area);
+    let modal = centered(80, 22, above_status(frame.area()));
     frame.render_widget(Clear, modal);
     let title = if form.target.is_some() {
         " Edit entry "
@@ -155,6 +154,15 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
     }
 }
 
+/// The screen minus the status line and key bar at the bottom: saving a
+/// form reports errors in the status line, so an editor must not cover it.
+fn above_status(area: Rect) -> Rect {
+    Rect {
+        height: area.height.saturating_sub(2),
+        ..area
+    }
+}
+
 fn draw_label(frame: &mut Frame, row: Rect, name: &str, focused: bool) {
     let line = if focused {
         Line::from(vec![
@@ -175,8 +183,7 @@ fn draw_label(frame: &mut Frame, row: Rect, name: &str, focused: bool) {
 }
 
 pub fn draw_group(frame: &mut Frame, app: &App, form: &GroupForm) {
-    let area = frame.area();
-    let modal = centered(56, 8, area);
+    let modal = centered(56, 8, above_status(frame.area()));
     frame.render_widget(Clear, modal);
     let title = if form.target.is_some() {
         " Rename group "

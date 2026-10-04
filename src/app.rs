@@ -2358,6 +2358,22 @@ mod tests {
     }
 
     #[test]
+    fn editor_errors_stay_visible_on_a_24_row_terminal() {
+        let (_dir, mut app) = unlocked(|_| {});
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_OTP].set_text("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0");
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.screen, Screen::EntryEdit(_)), "save refused");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        assert!(screen_text(&terminal).contains("invalid OTP period"));
+    }
+
+    #[test]
     fn editor_masks_the_totp_secret() {
         let (_dir, mut app) = unlocked(|db| {
             db.root_mut().add_entry().edit(|e| {
