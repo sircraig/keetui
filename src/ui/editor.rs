@@ -1,35 +1,25 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
-use ratatui::layout::{Margin, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::layout::{Position, Rect};
+use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, ENTRY_FIELD_LABELS, EntryForm, F_NOTES, F_OTP, F_PASS, GroupForm, Hit};
 
 use super::{
-    ACCENT, DIM, FORM_LABEL_W, btn, buttons, buttons_right, centered, ctrl, field_label, hit, key,
-    mask, scroll_window, skip_cells, width,
+    ACCENT, DIM, FORM_LABEL_W, btn, buttons, buttons_right, ctrl, field_label, hit, key, mask,
+    modal, scroll_window, skip_cells, width,
 };
 
-fn modal_block(title: &'static str) -> Block<'static> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Span::raw(title).fg(ACCENT).bold())
-}
-
 pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
-    let modal = centered(80, 22, above_status(frame.area()));
-    frame.render_widget(Clear, modal);
+    let area = above_status(frame.area());
     let title = if form.target.is_some() {
         " Edit entry "
     } else {
         " New entry "
     };
-    let block = modal_block(title);
-    let inner = block.inner(modal).inner(Margin::new(1, 1));
-    frame.render_widget(block, modal);
+    let inner = modal(frame, area, (80, 22), title, ACCENT);
     if inner.height < 4 {
         return;
     }
@@ -162,16 +152,13 @@ fn above_status(area: Rect) -> Rect {
 }
 
 pub fn draw_group(frame: &mut Frame, app: &App, form: &GroupForm) {
-    let modal = centered(56, 8, above_status(frame.area()));
-    frame.render_widget(Clear, modal);
+    let area = above_status(frame.area());
     let title = if form.target.is_some() {
         " Rename group "
     } else {
         " New group "
     };
-    let block = modal_block(title);
-    let inner = block.inner(modal).inner(Margin::new(1, 1));
-    frame.render_widget(block, modal);
+    let inner = modal(frame, area, (56, 8), title, ACCENT);
     if inner.height < 3 {
         return;
     }

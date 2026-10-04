@@ -4,31 +4,32 @@ use chrono::DateTime;
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Hit};
 use crate::picker::{ItemKind, PickerState, size_label, tilde};
 
 use super::{
-    ACCENT, DIM, ERR, btn, buttons, centered, ctrl, hit, key, scroll_window, selection_style, width,
+    ACCENT, DIM, ERR, btn, buttons, ctrl, hit, key, modal_with_margin, scroll_window,
+    selection_style, width,
 };
 
 pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     let area = frame.area();
-    let modal = centered(
+    let size = (
         area.width.saturating_sub(4).min(96),
         area.height.saturating_sub(2).min(30),
-        area,
     );
-    frame.render_widget(Clear, modal);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Span::raw(" 📂 Open database ").fg(ACCENT).bold());
-    let inner = block.inner(modal).inner(Margin::new(1, 0));
-    frame.render_widget(block, modal);
+    let inner = modal_with_margin(
+        frame,
+        area,
+        size,
+        " 📂 Open database ",
+        ACCENT,
+        Margin::new(1, 0),
+    );
     if inner.height < 7 || inner.width < 20 {
         return;
     }

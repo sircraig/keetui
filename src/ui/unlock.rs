@@ -3,9 +3,9 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Stylize;
 use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{
     App, C_CONFIRM, C_KEYFILE, C_PASS, CREATE_FIELD_LABELS, CreateState, Hit, StatusKind,
@@ -13,20 +13,14 @@ use crate::app::{
 };
 
 use super::{
-    ACCENT, DIM, ERR, FORM_LABEL_W, OK, WARN, btn, buttons, centered, ctrl, field_label, hit, key,
-    mask, scroll_window, truncate,
+    ACCENT, DIM, ERR, FORM_LABEL_W, OK, WARN, btn, buttons, ctrl, field_label, hit, key, mask,
+    modal_with_margin, scroll_window, truncate,
 };
 
 /// The bordered box shared by both screens; returns its padded inner area.
 fn panel(frame: &mut Frame, h: u16, title: &'static str) -> Option<Rect> {
-    let modal = centered(66, h, frame.area());
-    frame.render_widget(Clear, modal);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Span::raw(title).fg(ACCENT).bold());
-    let inner = block.inner(modal).inner(Margin::new(2, 1));
-    frame.render_widget(block, modal);
+    let area = frame.area();
+    let inner = modal_with_margin(frame, area, (66, h), title, ACCENT, Margin::new(2, 1));
     // Only draw the form when all of it fits (border + padding = 4 rows).
     (inner.height + 4 >= h).then_some(inner)
 }

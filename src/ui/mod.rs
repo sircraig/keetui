@@ -7,10 +7,10 @@ mod unlock;
 use chrono::{NaiveDateTime, TimeZone};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Hit, Screen};
@@ -125,6 +125,38 @@ pub(crate) fn selection_style(focused: bool) -> Style {
             .fg(Color::Reset)
             .add_modifier(Modifier::REVERSED)
     }
+}
+
+/// A modal window: a cleared, rounded, titled box of at most `size`
+/// centered in `area`. Returns its inside, padded by one cell.
+pub(crate) fn modal(
+    frame: &mut Frame,
+    area: Rect,
+    size: (u16, u16),
+    title: &'static str,
+    color: Color,
+) -> Rect {
+    modal_with_margin(frame, area, size, title, color, Margin::new(1, 1))
+}
+
+/// Like `modal`, padded by `margin` instead.
+pub(crate) fn modal_with_margin(
+    frame: &mut Frame,
+    area: Rect,
+    (w, h): (u16, u16),
+    title: &'static str,
+    color: Color,
+    margin: Margin,
+) -> Rect {
+    let rect = centered(w, h, area);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(color))
+        .title(Span::raw(title).fg(color).bold());
+    let inner = block.inner(rect).inner(margin);
+    frame.render_widget(block, rect);
+    inner
 }
 
 /// A rect of at most `w` x `h`, centered in `area`.
