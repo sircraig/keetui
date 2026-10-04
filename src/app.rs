@@ -1729,7 +1729,9 @@ impl App {
                     .map(|_| "entry moved to recycle bin")
                     .map_err(|_| "failed to move entry to recycle bin"),
                 None => {
-                    e.remove();
+                    // Tracked, so the deletion is recorded in DeletedObjects
+                    // and a sync with an older copy doesn't bring it back.
+                    e.track_changes().remove();
                     Ok("entry deleted")
                 }
             }
@@ -1754,10 +1756,12 @@ impl App {
                     .move_to(bin)
                     .map(|_| "group moved to recycle bin")
                     .map_err(|_| "failed to move group to recycle bin"),
-                None => {
-                    g.remove();
-                    Ok("group deleted")
-                }
+                // Tracked: records the group and everything in it as deleted.
+                None => g
+                    .track_changes()
+                    .remove()
+                    .map(|_| "group deleted")
+                    .map_err(|_| "the root group cannot be deleted"),
             }
         };
         if self.sel_group == Some(id) {
@@ -2448,6 +2452,53 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn permanent_deletes_are_recorded_as_deleted_objects() {
+        // Without these records, syncing with an older copy of the vault
+        // (KeePass, Keepass2Android, keepass-rs merge) brings them back.
+        let (_dir, mut app) = unlocked(|db| {
+            db.root_mut()
+                .add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "OldBank"));
+            let mut root = db.root_mut();
+            let mut work = root.add_group();
+            work.name = "Work".into();
+            work.add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "Inside"));
+        });
+        let ids = {
+            let db = &app.vault.as_ref().unwrap().db;
+            assert!(db.recycle_bin().is_none(), "deletes must be permanent here");
+            let root = db.root();
+            let work = root.group_by_name("Work").unwrap();
+            [
+                root.entry_by_name("OldBank").unwrap().id().uuid(),
+                work.id().uuid(),
+                work.entry_by_name("Inside").unwrap().id().uuid(),
+            ]
+        };
+
+        // Delete OldBank from the entries pane, then the Work group.
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        let deleted = |app: &App| {
+            let db = &app.vault.as_ref().unwrap().db;
+            ids.map(|id| db.deleted_objects.contains_key(&id))
+        };
+        assert_eq!(deleted(&app), [true; 3]);
+
+        // And they survive a save.
+        app.on_key(ctrl('s'));
+        let path = app.vault.as_ref().unwrap().path.clone();
+        app.vault = Some(Vault::open(&path, "pw", None).unwrap());
+        assert_eq!(deleted(&app), [true; 3]);
     }
 
     #[test]
