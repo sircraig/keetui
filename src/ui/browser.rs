@@ -13,7 +13,7 @@ use crate::event::Action;
 
 use super::{
     ACCENT, Btn, DIM, ERR, HIDDEN, OK, WARN, btn, buttons, buttons_right, buttons_width, hit,
-    hovered, key, key_bar, scroll_window, selection_style, truncate, width,
+    hovered, key, key_bar, scroll_offset, scroll_window, selection_style, truncate, width,
 };
 
 const LABEL_W: u16 = 10;
@@ -70,9 +70,24 @@ fn draw_groups(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let bin = v.db.recycle_bin().map(|g| g.id());
+    let selected = app
+        .group_rows
+        .iter()
+        .position(|(g, _)| Some(*g) == app.sel_group);
+    let height = usize::from(inner.height);
+    let offset = scroll_offset(
+        app.group_offset.get(),
+        selected,
+        height,
+        app.group_rows.len(),
+    );
+    app.group_offset.set(offset);
+    // Only the rows that fit are built.
     let items: Vec<ListItem> = app
         .group_rows
         .iter()
+        .skip(offset)
+        .take(height)
         .map(|(id, depth)| {
             let Some(g) = v.db.group(*id) else {
                 return ListItem::new("?");
@@ -99,19 +114,12 @@ fn draw_groups(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let selected = app
-        .group_rows
-        .iter()
-        .position(|(g, _)| Some(*g) == app.sel_group);
-    let mut state = ListState::default()
-        .with_offset(app.group_offset.get())
-        .with_selected(selected);
+    let mut state = ListState::default().with_selected(selected.map(|s| s - offset));
     let list = List::new(items).highlight_style(selection_style(focused));
     frame.render_stateful_widget(list, inner, &mut state);
-    app.group_offset.set(state.offset());
 
     for row in 0..inner.height {
-        let Some((id, depth)) = app.group_rows.get(state.offset() + row as usize) else {
+        let Some((id, depth)) = app.group_rows.get(offset + row as usize) else {
             break;
         };
         let y = inner.y + row;
@@ -190,9 +198,25 @@ fn draw_entries(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    let selected = app
+        .entry_rows
+        .iter()
+        .position(|e| Some(*e) == app.sel_entry);
+    let height = usize::from(list_area.height);
+    let offset = scroll_offset(
+        app.entry_offset.get(),
+        selected,
+        height,
+        app.entry_rows.len(),
+    );
+    app.entry_offset.set(offset);
+    // Only the rows that fit are built (while searching, each one also
+    // works out its group path).
     let items: Vec<ListItem> = app
         .entry_rows
         .iter()
+        .skip(offset)
+        .take(height)
         .map(|id| {
             let Some(e) = v.db.entry(*id) else {
                 return ListItem::new("?");
@@ -215,19 +239,12 @@ fn draw_entries(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let selected = app
-        .entry_rows
-        .iter()
-        .position(|e| Some(*e) == app.sel_entry);
-    let mut state = ListState::default()
-        .with_offset(app.entry_offset.get())
-        .with_selected(selected);
+    let mut state = ListState::default().with_selected(selected.map(|s| s - offset));
     let list = List::new(items).highlight_style(selection_style(focused));
     frame.render_stateful_widget(list, list_area, &mut state);
-    app.entry_offset.set(state.offset());
 
     for row in 0..list_area.height {
-        let Some(id) = app.entry_rows.get(state.offset() + row as usize) else {
+        let Some(id) = app.entry_rows.get(offset + row as usize) else {
             break;
         };
         let r = Rect::new(list_area.x, list_area.y + row, list_area.width, 1);

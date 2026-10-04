@@ -12,8 +12,8 @@ use crate::app::{App, Hit};
 use crate::picker::{ItemKind, PickerState, size_label, tilde};
 
 use super::{
-    ACCENT, DIM, ERR, btn, buttons, ctrl, hit, key, modal_with_margin, scroll_window,
-    selection_style, width,
+    ACCENT, DIM, ERR, btn, buttons, ctrl, hit, key, modal_with_margin, scroll_offset,
+    scroll_window, selection_style, width,
 };
 
 pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
@@ -64,12 +64,12 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height - 5);
     app.page_rows.set(list.height.max(1) as usize);
     let visible = st.visible();
-    let mut offset = st.offset.get();
-    if st.selected < offset {
-        offset = st.selected;
-    } else if st.selected >= offset + list.height as usize {
-        offset = st.selected + 1 - list.height as usize;
-    }
+    let offset = scroll_offset(
+        st.offset.get(),
+        Some(st.selected),
+        list.height.into(),
+        visible.len(),
+    );
     st.offset.set(offset);
 
     for (r, (vi, &ii)) in visible

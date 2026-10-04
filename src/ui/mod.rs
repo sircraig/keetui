@@ -200,6 +200,28 @@ where
     zone.from_utc_datetime(&utc).format(format).to_string()
 }
 
+/// The first row to show of a list of `len` rows in `height` lines, so that
+/// `selected` is in view, scrolling as little as possible from `offset`.
+/// This is what ratatui's List does for one-line items; working it out
+/// up front lets callers build only the rows that fit.
+pub(crate) fn scroll_offset(
+    offset: usize,
+    selected: Option<usize>,
+    height: usize,
+    len: usize,
+) -> usize {
+    let last = len.saturating_sub(1);
+    let mut offset = offset.min(last);
+    if let Some(selected) = selected.map(|s| s.min(last)) {
+        if selected < offset {
+            offset = selected;
+        } else if height > 0 && selected >= offset + height {
+            offset = selected + 1 - height;
+        }
+    }
+    offset
+}
+
 /// Truncate to `max` terminal cells, marking the cut with an ellipsis.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.width() <= max {
@@ -424,6 +446,37 @@ mod tests {
         assert_eq!(skip_cells("クレジット", 4), ("ジット", 4));
         // A wide character straddling the cut is dropped whole.
         assert_eq!(skip_cells("クレジット", 3), ("ジット", 4));
+    }
+
+    #[test]
+    fn scroll_offset_matches_ratatui_list() {
+        use ratatui::widgets::{List, ListState};
+        for len in 0..12 {
+            for height in 1..6u16 {
+                for offset in 0..14 {
+                    for selected in std::iter::once(None).chain((0..14).map(Some)) {
+                        let items: Vec<&str> = vec!["row"; len];
+                        let mut state = ListState::default()
+                            .with_offset(offset)
+                            .with_selected(selected);
+                        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 8, height));
+                        ratatui::widgets::StatefulWidget::render(
+                            List::new(items),
+                            buffer.area,
+                            &mut buffer,
+                            &mut state,
+                        );
+                        if len > 0 {
+                            assert_eq!(
+                                scroll_offset(offset, selected, height.into(), len),
+                                state.offset(),
+                                "len {len} height {height} offset {offset} selected {selected:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
