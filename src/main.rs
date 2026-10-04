@@ -10,6 +10,8 @@ mod ui;
 
 use std::io::stdout;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -18,8 +20,14 @@ use ratatui::crossterm::event::{
     self as cevent, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
+
+use crate::clipboard::Clipboard;
 
 const TICK: Duration = Duration::from_millis(250);
+/// How long a termination signal waits for the main loop to exit by itself.
+const SIGNAL_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Parser)]
 #[command(version, about = "A KeePass-compatible TUI password manager")]
@@ -55,29 +63,66 @@ fn main() -> Result<()> {
 
     let mouse = !args.no_mouse;
     let mut app = app::App::new(args.database, args.keyfile);
+    let clipboard = app.clipboard.clone();
+    let quit = Arc::new(AtomicBool::new(false));
+    watch_signals(clipboard.clone(), Arc::clone(&quit), mouse)?;
+
     let mut terminal = ratatui::init();
+    // ratatui's panic hook restores the terminal; ours runs first to clear
+    // the clipboard and to release mouse capture, which ratatui knows nothing
+    // about, so a crash leaves neither a secret nor an unusable shell behind.
+    let hook = std::panic::take_hook();
+    let on_panic = clipboard.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        on_panic.clear_now();
+        release_terminal(mouse);
+        hook(info);
+    }));
     if mouse {
-        // ratatui's panic hook restores the terminal but knows nothing about
-        // mouse capture; release it first so a crash leaves a usable shell.
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(stdout(), DisableMouseCapture);
-            hook(info);
-        }));
         execute!(stdout(), EnableMouseCapture)?;
     }
-    let res = run(&mut terminal, &mut app);
-    if mouse {
-        let _ = execute!(stdout(), DisableMouseCapture);
-    }
-    ratatui::restore();
+    let res = run(&mut terminal, &mut app, &quit);
+    clipboard.clear_now();
+    release_terminal(mouse);
+    // Not `restore()`: after SIGHUP the terminal is gone, and its error
+    // report would panic writing to it.
+    let _ = ratatui::try_restore();
     res
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
+/// Undo the terminal modes keetui enables on top of ratatui's own setup.
+fn release_terminal(mouse: bool) {
+    if mouse {
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
+}
+
+/// SIGHUP (terminal closed), SIGTERM and SIGINT would kill keetui before it
+/// clears the clipboard. Ask the main loop to stop instead; if it hasn't
+/// within a moment (it may be busy deriving a key), clean up from here.
+fn watch_signals(clipboard: Clipboard, quit: Arc<AtomicBool>, mouse: bool) -> Result<()> {
+    let mut signals = Signals::new([SIGHUP, SIGINT, SIGTERM])?;
+    std::thread::spawn(move || {
+        if let Some(sig) = signals.forever().next() {
+            quit.store(true, Ordering::Relaxed);
+            std::thread::sleep(SIGNAL_GRACE);
+            clipboard.clear_now();
+            release_terminal(mouse);
+            let _ = ratatui::try_restore();
+            std::process::exit(128 + sig);
+        }
+    });
+    Ok(())
+}
+
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut app::App,
+    quit: &AtomicBool,
+) -> Result<()> {
     let mut last_tick = Instant::now();
     let mut redraw = true;
-    while !app.should_quit {
+    while !app.should_quit && !quit.load(Ordering::Relaxed) {
         if redraw {
             terminal.draw(|f| ui::draw(f, app))?;
         }

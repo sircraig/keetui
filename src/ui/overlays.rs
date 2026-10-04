@@ -219,8 +219,11 @@ fn draw_help(frame: &mut Frame, app: &App) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(
-        Span::raw("Copied secrets clear from the clipboard after 15s. Press any key to close.")
-            .fg(DIM),
+        Span::raw(
+            "Copied secrets clear from the clipboard after 15s or when keetui exits. \
+             Press any key to close.",
+        )
+        .fg(DIM),
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
