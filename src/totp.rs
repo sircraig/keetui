@@ -7,6 +7,7 @@
 use std::str::FromStr;
 
 use keepass::db::TOTP;
+use zeroize::Zeroizing;
 
 /// keepass-rs accepts any period and digit count, but code generation
 /// (totp-lite) divides by the period and by 10^digits, so a zero period or
@@ -27,23 +28,26 @@ pub fn parse(url: &str) -> Result<TOTP, String> {
 }
 
 /// Normalize user input for the otp field: pass otpauth:// URLs through,
-/// wrap a bare base32 secret into a KeePassXC-compatible URL.
-pub fn normalize_otp(input: &str, title: &str) -> String {
+/// wrap a bare base32 secret into a KeePassXC-compatible URL. Buffers are
+/// sized up front so no reallocation leaves the secret behind unwiped.
+pub fn normalize_otp(input: &str, title: &str) -> Zeroizing<String> {
     let trimmed = input.trim();
     if trimmed.starts_with("otpauth://") {
-        return trimmed.to_string();
+        return Zeroizing::new(trimmed.to_string());
     }
-    let secret: String = trimmed
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_uppercase();
-    let label = if title.is_empty() { "keetui" } else { title };
-    format!(
-        "otpauth://totp/{}?secret={}&period=30&digits=6",
-        percent_encode(label),
-        secret
-    )
+    let mut secret = Zeroizing::new(String::with_capacity(trimmed.len()));
+    secret.extend(trimmed.chars().filter(|c| !c.is_whitespace()));
+    secret.make_ascii_uppercase();
+    let label = percent_encode(if title.is_empty() { "keetui" } else { title });
+
+    const PARTS: [&str; 3] = ["otpauth://totp/", "?secret=", "&period=30&digits=6"];
+    let len = PARTS.iter().map(|p| p.len()).sum::<usize>() + label.len() + secret.len();
+    let mut url = Zeroizing::new(String::with_capacity(len));
+    for (part, value) in PARTS.iter().zip([label.as_str(), secret.as_str(), ""]) {
+        url.push_str(part);
+        url.push_str(value);
+    }
+    url
 }
 
 fn percent_encode(s: &str) -> String {
@@ -72,15 +76,17 @@ mod tests {
     #[test]
     fn passes_through_otpauth_urls() {
         let url = "otpauth://totp/x?secret=ABC&period=30";
-        assert_eq!(normalize_otp(url, "t"), url);
+        assert_eq!(normalize_otp(url, "t").as_str(), url);
     }
 
     #[test]
     fn wraps_bare_secret() {
+        let url = normalize_otp("abcd efgh", "My Site");
         assert_eq!(
-            normalize_otp("abcd efgh", "My Site"),
+            url.as_str(),
             "otpauth://totp/My%20Site?secret=ABCDEFGH&period=30&digits=6"
         );
+        assert_eq!(url.len(), url.capacity(), "sized exactly, never grown");
     }
 
     #[test]

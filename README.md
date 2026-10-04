@@ -119,13 +119,17 @@ seconds, the auto-clear will clear that too.
 
 ## Security notes
 
-Proportionate to a personal tool: the master password and form buffers are
-zeroized after use, protected fields stay encrypted in memory via the keepass
-crate, secrets are piped (never passed as arguments), and nothing is logged.
-Core dumps are disabled and the process is marked non-dumpable, so a crash
-can't write decrypted secrets to disk and other processes of the same user
-can't read keetui's memory. No mlock/swap hardening — use full-disk
-encryption and encrypted swap.
+Proportionate to a personal tool. While a vault is open, its contents are in
+memory as plain text: the keepass crate keeps protected fields (passwords,
+TOTP secrets) in buffers that are wiped when freed, but does not encrypt
+them. keetui wipes the master password, the key file and form buffers when
+it is done with them, and sizes those buffers so typing doesn't leave copies
+behind; text shown on screen also passes through the terminal library's
+buffers, which are not wiped. Core dumps are disabled and the process is
+marked non-dumpable, so a crash can't write decrypted secrets to disk and
+other processes of the same user can't read keetui's memory. Secrets are
+piped to `wl-copy` (never passed as arguments), and nothing is logged. No
+mlock/swap hardening — use full-disk encryption and encrypted swap.
 
 ## Development
 

@@ -28,19 +28,44 @@ const REVEAL_TTL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Text editing primitive shared by all forms. The buffer is Zeroizing so
-// secrets typed into any field are wiped when the form is dropped.
+// secrets typed into any field are wiped when the form is dropped, and it
+// never lets `String` reallocate: that would free the old buffer unwiped,
+// leaving a copy of what was typed so far on the heap.
 
-#[derive(Default)]
+/// Every field starts with room for this much, so typical input never has
+/// to grow the buffer at all.
+const FIELD_CAPACITY: usize = 256;
+
 pub struct TextField {
     pub text: Zeroizing<String>,
     pub cursor: usize, // char index
 }
 
+impl Default for TextField {
+    fn default() -> Self {
+        TextField {
+            text: Zeroizing::new(String::with_capacity(FIELD_CAPACITY)),
+            cursor: 0,
+        }
+    }
+}
+
 impl TextField {
     pub fn with_text(s: &str) -> Self {
-        TextField {
-            cursor: s.chars().count(),
-            text: Zeroizing::new(s.to_string()),
+        let mut field = TextField::default();
+        field.set_text(s);
+        field
+    }
+
+    /// Make room for `extra` more bytes by moving to a bigger buffer; the
+    /// old one is zeroized as it drops.
+    fn reserve(&mut self, extra: usize) {
+        let needed = self.text.len() + extra;
+        if needed > self.text.capacity() {
+            let capacity = needed.max(2 * self.text.capacity());
+            let mut grown = Zeroizing::new(String::with_capacity(capacity));
+            grown.push_str(&self.text);
+            self.text = grown;
         }
     }
 
@@ -53,6 +78,7 @@ impl TextField {
     }
 
     pub fn insert(&mut self, c: char) {
+        self.reserve(c.len_utf8());
         let i = self.byte_idx();
         self.text.insert(i, c);
         self.cursor += 1;
@@ -60,6 +86,7 @@ impl TextField {
 
     /// Insert `s` at the cursor; returns true if anything was inserted.
     pub fn insert_str(&mut self, s: &str) -> bool {
+        self.reserve(s.len());
         let i = self.byte_idx();
         self.text.insert_str(i, s);
         self.cursor += s.chars().count();
@@ -103,7 +130,9 @@ impl TextField {
     }
 
     pub fn set_text(&mut self, s: &str) {
-        self.text = Zeroizing::new(s.to_string());
+        let mut text = Zeroizing::new(String::with_capacity(s.len().max(FIELD_CAPACITY)));
+        text.push_str(s);
+        self.text = text;
         self.cursor = s.chars().count();
     }
 
@@ -1402,8 +1431,7 @@ impl App {
                 let raw = form.fields[F_OTP].text.trim();
                 (!raw.is_empty())
                     .then(|| {
-                        let otp =
-                            Zeroizing::new(totp::normalize_otp(raw, &form.fields[F_TITLE].text));
+                        let otp = totp::normalize_otp(raw, &form.fields[F_TITLE].text);
                         totp::parse(&otp).err()
                     })
                     .flatten()
@@ -1429,8 +1457,7 @@ impl App {
         let url = form.fields[F_URL].text.to_string();
         let otp_raw = Zeroizing::new(form.fields[F_OTP].text.trim().to_string());
         let notes = form.fields[F_NOTES].text.to_string();
-        let otp =
-            (!otp_raw.is_empty()).then(|| Zeroizing::new(totp::normalize_otp(&otp_raw, &title)));
+        let otp = (!otp_raw.is_empty()).then(|| totp::normalize_otp(&otp_raw, &title));
 
         let id = match form.target {
             Some(id) => Some(id),
@@ -2247,6 +2274,21 @@ mod tests {
         app.on_key(ctrl('s'));
         assert!(matches!(app.screen, Screen::Browser));
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn text_field_never_reallocates_in_place() {
+        let mut f = TextField::default();
+        let buffer = f.text.as_ptr();
+        for _ in 0..FIELD_CAPACITY {
+            f.insert('x');
+        }
+        assert_eq!(f.text.as_ptr(), buffer, "filled without reallocating");
+        // Growing moves to a new, bigger buffer (wiping the old one).
+        f.insert_str("yz");
+        assert_eq!(f.text.len(), FIELD_CAPACITY + 2);
+        assert!(f.text.capacity() >= 2 * FIELD_CAPACITY);
+        assert!(f.text.ends_with("xyz"));
     }
 
     #[test]

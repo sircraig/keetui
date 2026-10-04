@@ -11,6 +11,7 @@ use keepass::{
     config::{DatabaseConfig, DatabaseVersion, KdfConfig},
     db::{DatabaseOpenError, EntryId, GroupId, fields},
 };
+use zeroize::Zeroizing;
 
 pub struct Vault {
     pub db: Database,
@@ -226,8 +227,9 @@ fn build_key(password: &str, keyfile: Option<&Path>) -> Result<DatabaseKey> {
         key = key.with_password(password);
     }
     if let Some(kf) = keyfile {
-        let kf_data =
-            fs::read(kf).with_context(|| format!("cannot read key file {}", kf.display()))?;
+        let kf_data = Zeroizing::new(
+            fs::read(kf).with_context(|| format!("cannot read key file {}", kf.display()))?,
+        );
         key = key.with_keyfile(&mut kf_data.as_slice())?;
     }
     if key.is_empty() {
