@@ -58,6 +58,14 @@ impl TextField {
         self.cursor += 1;
     }
 
+    /// Insert `s` at the cursor; returns true if anything was inserted.
+    pub fn insert_str(&mut self, s: &str) -> bool {
+        let i = self.byte_idx();
+        self.text.insert_str(i, s);
+        self.cursor += s.chars().count();
+        !s.is_empty()
+    }
+
     pub fn backspace(&mut self) -> bool {
         if self.cursor == 0 {
             return false;
@@ -490,6 +498,59 @@ impl App {
             Screen::Browser => self.on_browser_key(key),
             Screen::EntryEdit(_) => self.on_entry_edit_key(key),
             Screen::GroupEdit(_) => self.on_group_edit_key(key),
+        }
+    }
+
+    /// A bracketed paste goes into the focused text field, or the search
+    /// box while searching; anywhere else it is ignored. (Without bracketed
+    /// paste it would arrive as keystrokes, control bytes included, and run
+    /// as commands.) Only the notes field keeps line breaks.
+    pub fn on_paste(&mut self, text: &str) {
+        self.last_input = Instant::now();
+        if self.overlay.is_some() {
+            return;
+        }
+        let line: String = text.chars().filter(|c| !c.is_control()).collect();
+        if matches!(self.screen, Screen::Browser) {
+            if self.search_input {
+                self.edit_search(|q| q.push_str(&line));
+            }
+            return;
+        }
+        match &mut self.screen {
+            Screen::Picker(st) => {
+                st.filter.push_str(&line);
+                st.selected = 0;
+            }
+            Screen::Unlock(st) if !st.working => {
+                let field = if st.focus_keyfile {
+                    &mut st.keyfile
+                } else {
+                    &mut st.password
+                };
+                field.insert_str(&line);
+            }
+            Screen::Create(st) if !st.working => {
+                if st.fields[st.focus].insert_str(&line) {
+                    st.error = None;
+                }
+            }
+            Screen::EntryEdit(form) => {
+                let text = if form.focus == F_NOTES {
+                    multiline(text)
+                } else {
+                    line
+                };
+                if form.fields[form.focus].insert_str(&text) {
+                    form.modified = true;
+                }
+            }
+            Screen::GroupEdit(form) => {
+                if form.name.insert_str(&line) {
+                    form.modified = true;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1878,6 +1939,16 @@ fn notes_vertical(field: &mut TextField, up: bool) -> bool {
     true
 }
 
+/// Pasted text for a multi-line field: line breaks normalized to `\n`,
+/// other control characters dropped.
+fn multiline(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|&c| c == '\n' || !c.is_control())
+        .collect()
+}
+
 /// "5 minutes" style rendering of a lock timeout.
 fn minutes(d: Duration) -> String {
     match d.as_secs() {
@@ -2034,6 +2105,52 @@ mod tests {
         assert!(!app.should_quit);
         app.on_key(key(KeyCode::Char('d')));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn pastes_never_run_as_commands() {
+        let (_dir, mut app) = lockable();
+        // Delete-and-confirm, save and quit, if these were keystrokes.
+        app.on_paste("dy\x13q");
+        assert!(app.overlay.is_none() && !app.dirty && !app.should_quit);
+        assert!(matches!(app.screen, Screen::Browser));
+
+        // While searching, a paste is search text; Ctrl-C (0x03) inside it
+        // must not end the search.
+        app.on_key(key(KeyCode::Char('/')));
+        app.on_paste("Bra\x03vo");
+        assert_eq!(app.search.as_deref(), Some("Bravo"));
+        assert!(app.search_input);
+    }
+
+    #[test]
+    fn pastes_go_into_the_focused_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.kdbx");
+        std::fs::write(&path, b"").unwrap();
+        let mut app = App::new(Some(path), None, None);
+        // A trailing newline must not submit the unlock form.
+        app.on_paste("hunter2\n");
+        let Screen::Unlock(st) = &app.screen else {
+            panic!("expected the unlock screen");
+        };
+        assert_eq!(st.password.text.as_str(), "hunter2");
+        assert!(!st.working);
+
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_paste("Title\twith\ttabs");
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.focus = F_NOTES;
+        app.on_paste("one\r\ntwo\x1b[31m");
+        let Screen::EntryEdit(form) = &app.screen else {
+            unreachable!()
+        };
+        assert_eq!(form.fields[F_TITLE].text.as_str(), "Titlewithtabs");
+        assert_eq!(form.fields[F_NOTES].text.as_str(), "one\ntwo[31m");
+        assert!(form.modified);
     }
 
     #[test]

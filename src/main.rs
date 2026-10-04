@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use clap::Parser;
 use ratatui::crossterm::event::{
-    self as cevent, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+    self as cevent, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+    EnableMouseCapture, Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
@@ -84,6 +85,9 @@ fn main() -> Result<()> {
         release_terminal(mouse);
         hook(info);
     }));
+    // Bracketed paste delivers a paste as one event instead of keystrokes,
+    // so pasted text can't run as commands.
+    execute!(stdout(), EnableBracketedPaste)?;
     if mouse {
         execute!(stdout(), EnableMouseCapture)?;
     }
@@ -98,6 +102,7 @@ fn main() -> Result<()> {
 
 /// Undo the terminal modes keetui enables on top of ratatui's own setup.
 fn release_terminal(mouse: bool) {
+    let _ = execute!(stdout(), DisableBracketedPaste);
     if mouse {
         let _ = execute!(stdout(), DisableMouseCapture);
     }
@@ -138,6 +143,10 @@ fn run(
             match cevent::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     app.on_key(key);
+                    redraw = true;
+                }
+                Event::Paste(text) => {
+                    app.on_paste(&text);
                     redraw = true;
                 }
                 Event::Mouse(m) => {

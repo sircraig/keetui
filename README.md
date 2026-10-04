@@ -85,7 +85,9 @@ the terminal instead, or start with `--no-mouse`.
 
 `Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password, `Ctrl-g`
 generates one, `Ctrl-u` clears the field, `Ctrl-s` saves the entry, `Esc`
-cancels. The OTP field accepts an `otpauth://` URL or a bare base32 secret
+cancels. Pasting inserts into the focused field (line breaks are kept only
+in Notes); outside a text field or the search box a paste is ignored, so
+pasted text never runs as commands. The OTP field accepts an `otpauth://` URL or a bare base32 secret
 (stored KeePassXC-compatibly). Custom fields, tags and attachments are shown
 read-only and kept intact when editing.
 
