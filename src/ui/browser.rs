@@ -348,104 +348,57 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     );
     y += 2;
 
-    let mut field = |label: &str,
-                     text: String,
-                     style: Style,
-                     suffix: Vec<Span<'static>>,
-                     value_hit: Option<Hit>,
-                     btns: Vec<Btn>| {
-        if y >= bottom {
-            return;
+    let mut field = |r: Row<'_>| {
+        if y < bottom {
+            field_row(frame, app, row(y), r);
+            y += 1;
         }
-        field_row(
-            frame,
-            app,
-            row(y),
-            label,
-            text,
-            style,
-            suffix,
-            value_hit,
-            btns,
-        );
-        y += 1;
     };
+    let missing = |label| Row::new(label, "—", Style::new().fg(DIM));
 
     let user = e.get_username().unwrap_or("");
     if user.is_empty() {
-        field(
-            "Username",
-            "—".into(),
-            Style::new().fg(DIM),
-            vec![],
-            None,
-            vec![],
-        );
+        field(missing("Username"));
     } else {
+        let copy = Hit::EntryAct(Action::CopyUser);
         field(
-            "Username",
-            user.to_string(),
-            Style::new(),
-            vec![],
-            Some(Hit::EntryAct(Action::CopyUser)),
-            vec![btn("y", "copy", Hit::EntryAct(Action::CopyUser))],
+            Row::new("Username", user, Style::new())
+                .hit(copy.clone())
+                .buttons(vec![btn("y", "copy", copy)]),
         );
     }
 
     let pw = e.get_password().unwrap_or("");
     if pw.is_empty() {
-        field(
-            "Password",
-            "—".into(),
-            Style::new().fg(DIM),
-            vec![],
-            None,
-            vec![],
-        );
+        field(missing("Password"));
     } else {
         let (shown, style) = if app.reveal {
-            (pw.to_string(), Style::new().fg(WARN))
+            (pw, Style::new().fg(WARN))
         } else {
-            (HIDDEN.to_string(), Style::new())
+            (HIDDEN, Style::new())
         };
+        let reveal = if app.reveal { "hide" } else { "show" };
         field(
-            "Password",
-            shown,
-            style,
-            vec![],
-            Some(Hit::EntryAct(Action::CopyPass)),
-            vec![
-                btn(
-                    "r",
-                    if app.reveal { "hide" } else { "show" },
-                    Hit::EntryAct(Action::ToggleReveal),
-                ),
-                btn("c", "copy", Hit::EntryAct(Action::CopyPass)),
-            ],
+            Row::new("Password", shown, style)
+                .hit(Hit::EntryAct(Action::CopyPass))
+                .buttons(vec![
+                    btn("r", reveal, Hit::EntryAct(Action::ToggleReveal)),
+                    btn("c", "copy", Hit::EntryAct(Action::CopyPass)),
+                ]),
         );
     }
 
     let url = e.get_url().unwrap_or("");
     if url.is_empty() {
-        field(
-            "URL",
-            "—".into(),
-            Style::new().fg(DIM),
-            vec![],
-            None,
-            vec![],
-        );
+        field(missing("URL"));
     } else {
         field(
-            "URL",
-            url.to_string(),
-            Style::new().fg(ACCENT).underlined(),
-            vec![],
-            Some(Hit::EntryAct(Action::OpenUrl)),
-            vec![
-                btn("o", "open", Hit::EntryAct(Action::OpenUrl)),
-                btn("u", "copy", Hit::EntryAct(Action::CopyUrl)),
-            ],
+            Row::new("URL", url, Style::new().fg(ACCENT).underlined())
+                .hit(Hit::EntryAct(Action::OpenUrl))
+                .buttons(vec![
+                    btn("o", "open", Hit::EntryAct(Action::OpenUrl)),
+                    btn("u", "copy", Hit::EntryAct(Action::CopyUrl)),
+                ]),
         );
     }
 
@@ -460,37 +413,26 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
                     _ => OK,
                 };
                 let filled = ((left * 8).div_ceil(period)) as usize;
-                let suffix = vec![
+                let countdown = vec![
                     Span::raw("  "),
                     Span::raw("━".repeat(filled)).fg(color),
                     Span::raw("━".repeat(8 - filled.min(8))).fg(DIM),
                     Span::raw(format!(" {left:>2}s")).fg(color),
                 ];
+                let copy = Hit::EntryAct(Action::CopyOtp);
                 field(
-                    "TOTP",
-                    group_code(&code.code),
-                    Style::new().fg(ACCENT).bold(),
-                    suffix,
-                    Some(Hit::EntryAct(Action::CopyOtp)),
-                    vec![btn("t", "copy", Hit::EntryAct(Action::CopyOtp))],
+                    Row::new(
+                        "TOTP",
+                        group_code(&code.code),
+                        Style::new().fg(ACCENT).bold(),
+                    )
+                    .suffix(countdown)
+                    .hit(copy.clone())
+                    .buttons(vec![btn("t", "copy", copy)]),
                 );
             }
-            Ok(Err(_)) => field(
-                "TOTP",
-                "clock error".into(),
-                Style::new().fg(ERR),
-                vec![],
-                None,
-                vec![],
-            ),
-            Err(_) => field(
-                "TOTP",
-                "invalid OTP data".into(),
-                Style::new().fg(ERR),
-                vec![],
-                None,
-                vec![],
-            ),
+            Ok(Err(_)) => field(Row::new("TOTP", "clock error", Style::new().fg(ERR))),
+            Err(_) => field(Row::new("TOTP", "invalid OTP data", Style::new().fg(ERR))),
         }
     }
 
@@ -502,41 +444,26 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
     custom.sort_by(|a, b| a.0.cmp(b.0));
     for (key, value) in custom {
-        let (text, style) = if value.is_protected() && !app.reveal {
-            (HIDDEN.to_string(), Style::new())
+        let text = if value.is_protected() && !app.reveal {
+            HIDDEN
         } else {
-            (value.get().to_string(), Style::new())
+            value.get().as_str()
         };
+        let label = truncate(key, LABEL_W as usize - 1);
+        let copy = Hit::CopyField(key.clone());
         field(
-            &truncate(key, LABEL_W as usize - 1),
-            text,
-            style,
-            vec![],
-            Some(Hit::CopyField(key.clone())),
-            vec![btn("", "copy", Hit::CopyField(key.clone()))],
+            Row::new(&label, text, Style::new())
+                .hit(copy.clone())
+                .buttons(vec![btn("", "copy", copy)]),
         );
     }
 
     if !e.tags.is_empty() {
-        field(
-            "Tags",
-            e.tags.join(", "),
-            Style::new().fg(ACCENT),
-            vec![],
-            None,
-            vec![],
-        );
+        field(Row::new("Tags", e.tags.join(", "), Style::new().fg(ACCENT)));
     }
     let attachments: Vec<&str> = e.attachments_named().map(|(name, _)| name).collect();
     if !attachments.is_empty() {
-        field(
-            "Files",
-            attachments.join(", "),
-            Style::new(),
-            vec![],
-            None,
-            vec![],
-        );
+        field(Row::new("Files", attachments.join(", "), Style::new()));
     }
 
     // Footer: timestamps and expiry, pinned to the bottom.
@@ -559,18 +486,55 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn field_row(
-    frame: &mut Frame,
-    app: &App,
-    area: Rect,
-    label: &str,
+/// One row of the detail pane: a label, a value, and what the value offers.
+struct Row<'a> {
+    label: &'a str,
     text: String,
     style: Style,
+    /// Shown after the value when there's room, e.g. the TOTP countdown.
     suffix: Vec<Span<'static>>,
-    value_hit: Option<Hit>,
-    btns: Vec<Btn>,
-) {
+    /// What clicking the value does.
+    hit: Option<Hit>,
+    buttons: Vec<Btn<'a>>,
+}
+
+impl<'a> Row<'a> {
+    fn new(label: &'a str, text: impl Into<String>, style: Style) -> Self {
+        Row {
+            label,
+            text: text.into(),
+            style,
+            suffix: Vec::new(),
+            hit: None,
+            buttons: Vec::new(),
+        }
+    }
+
+    fn hit(mut self, hit: Hit) -> Self {
+        self.hit = Some(hit);
+        self
+    }
+
+    fn buttons(mut self, buttons: Vec<Btn<'a>>) -> Self {
+        self.buttons = buttons;
+        self
+    }
+
+    fn suffix(mut self, suffix: Vec<Span<'static>>) -> Self {
+        self.suffix = suffix;
+        self
+    }
+}
+
+fn field_row(frame: &mut Frame, app: &App, area: Rect, row: Row<'_>) {
+    let Row {
+        label,
+        text,
+        style,
+        suffix,
+        hit: value_hit,
+        buttons: btns,
+    } = row;
     frame.render_widget(
         Paragraph::new(Span::raw(label.to_string()).fg(DIM)),
         Rect {
