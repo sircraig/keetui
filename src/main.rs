@@ -5,6 +5,7 @@ mod event;
 mod generator;
 mod open;
 mod picker;
+mod recent;
 mod totp;
 mod ui;
 
@@ -76,7 +77,12 @@ fn main() -> Result<()> {
     let mouse = !args.no_mouse;
     let lock_after =
         (args.lock_after > 0).then(|| Duration::from_secs(args.lock_after.saturating_mul(60)));
-    let mut app = app::App::new(args.database, args.keyfile, lock_after);
+    let mut app = app::App::new(
+        args.database,
+        args.keyfile,
+        lock_after,
+        recent::default_file(),
+    );
     let clipboard = app.clipboard.clone();
     let quit = Arc::new(AtomicBool::new(false));
     watch_signals(clipboard.clone(), Arc::clone(&quit), mouse)?;

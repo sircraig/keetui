@@ -19,7 +19,7 @@ use crate::db::{ChangedOnDisk, Vault};
 use crate::event::{Action, browser_action};
 use crate::generator::{self, GenOpts, MAX_LENGTH, MIN_LENGTH};
 use crate::picker::{self, PickerState};
-use crate::{open, totp};
+use crate::{open, recent, totp};
 
 const STATUS_TTL: Duration = Duration::from_secs(5);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -424,6 +424,9 @@ pub struct App {
     pub vault: Option<Vault>,
     pub db_path: PathBuf,
     keyfile_arg: String,
+    /// Where the databases opened recently are remembered; None remembers
+    /// nothing.
+    recent_file: Option<PathBuf>,
     pub should_quit: bool,
     pub dirty: bool,
     /// The user agreed to save this database in another format.
@@ -473,6 +476,7 @@ impl App {
         db_path: Option<PathBuf>,
         keyfile: Option<PathBuf>,
         lock_after: Option<Duration>,
+        recent_file: Option<PathBuf>,
     ) -> Self {
         let keyfile_text = keyfile
             .as_deref()
@@ -491,6 +495,7 @@ impl App {
             vault: None,
             db_path,
             keyfile_arg: keyfile_text,
+            recent_file,
             should_quit: false,
             dirty: false,
             convert_ack: false,
@@ -900,6 +905,7 @@ impl App {
                 self.vault = Some(vault);
                 self.screen = Screen::Browser;
                 self.keyfile_arg = keyfile_text;
+                self.remember_db();
                 if resuming {
                     // Selection and expanded groups survived the lock.
                     self.rebuild();
@@ -908,6 +914,15 @@ impl App {
                 }
             }
             Err(e) => self.unlock_failed(format!("{e:#}")),
+        }
+    }
+
+    /// Put the open database first among the recent ones.
+    fn remember_db(&self) {
+        if let (Some(file), Some(v)) = (&self.recent_file, &self.vault) {
+            // Only a convenience: if the list can't be written (a read-only
+            // home, say), nothing is remembered, and that's all.
+            let _ = recent::remember(file, &v.path);
         }
     }
 
@@ -1074,6 +1089,7 @@ impl App {
                 let name = vault.file_name();
                 self.db_path = path;
                 self.vault = Some(vault);
+                self.remember_db();
                 self.screen = Screen::Browser;
                 self.init_after_unlock();
                 self.set_status(format!(
@@ -2261,7 +2277,7 @@ mod tests {
     /// derivation) whose contents `fill` sets up.
     fn unlocked(fill: impl FnOnce(&mut keepass::Database)) -> (tempfile::TempDir, App) {
         let (dir, path) = vault_file(fill);
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -2299,7 +2315,7 @@ mod tests {
         // "Creating…" frame comes first), and run_pending does.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.kdbx");
-        let mut app = App::new(Some(path.clone()), None, None);
+        let mut app = App::new(Some(path.clone()), None, None, None);
         let Screen::Create(st) = &mut app.screen else {
             panic!("expected the new-database screen");
         };
@@ -2314,7 +2330,7 @@ mod tests {
 
         // Unlocking: run_pending starts the background work right away.
         let (_dir, path) = vault_file(|_| {});
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -2328,9 +2344,34 @@ mod tests {
     }
 
     #[test]
+    fn databases_opened_or_created_are_remembered() {
+        let (dir, path) = vault_file(|_| {});
+        let list = dir.path().join("state/recent");
+        let mut app = App::new(Some(path.clone()), None, None, Some(list.clone()));
+        enter_password(&mut app, "wrong");
+        assert!(recent::load(&list).is_empty(), "remembered a failed unlock");
+        enter_password(&mut app, "pw");
+        let path = std::fs::canonicalize(path).unwrap();
+        assert_eq!(recent::load(&list), std::slice::from_ref(&path));
+
+        let new = dir.path().join("new.kdbx");
+        let mut app = App::new(Some(new.clone()), None, None, Some(list.clone()));
+        let Screen::Create(st) = &mut app.screen else {
+            panic!("expected the new-database screen");
+        };
+        st.fields[C_PASS].set_text("pw");
+        st.fields[C_CONFIRM].set_text("pw");
+        app.on_key(ctrl('s'));
+        app.run_pending();
+        assert!(matches!(app.screen, Screen::Browser), "creating failed");
+        let new = std::fs::canonicalize(new).unwrap();
+        assert_eq!(recent::load(&list), [new, path]);
+    }
+
+    #[test]
     fn unlocking_can_be_cancelled() {
         let (_dir, path) = vault_file(|_| {});
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -2471,7 +2512,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.kdbx");
         std::fs::write(&path, b"").unwrap();
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         // A trailing newline must not submit the unlock form.
         app.on_paste("hunter2\n");
         let Screen::Unlock(st) = &app.screen else {
@@ -2976,7 +3017,7 @@ mod tests {
     #[test]
     fn a_too_small_terminal_shows_why_and_ignores_keys() {
         let (_dir, path) = vault_file(|_| {});
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         // 80x12 is too short for the unlock form: it isn't drawn...
         let text = draw_at(&app, 80, 12);
         assert!(!text.contains("Password"));
@@ -3055,7 +3096,7 @@ mod tests {
     #[test]
     fn new_database_buttons_do_what_they_say() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Some(dir.path().join("new.kdbx")), None, None);
+        let mut app = App::new(Some(dir.path().join("new.kdbx")), None, None, None);
         let Screen::Create(st) = &mut app.screen else {
             panic!("expected the new-database screen");
         };
