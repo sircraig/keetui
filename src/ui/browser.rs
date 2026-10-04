@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDateTime;
-use keepass::db::fields;
+use keepass::db::{Times, fields};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
@@ -541,12 +541,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
 
     // Footer: timestamps and expiry, pinned to the bottom.
     let footer_y = bottom.saturating_sub(1);
-    let footer = footer_line(
-        e.times.expires,
-        e.times.expiry,
-        e.times.last_modification,
-        e.times.creation,
-    );
+    let footer = footer_line(&e.times);
     if footer_y > y {
         frame.render_widget(Paragraph::new(footer), row(footer_y));
     }
@@ -633,16 +628,11 @@ fn field_row(
     }
 }
 
-fn footer_line(
-    expires: Option<bool>,
-    expiry: Option<NaiveDateTime>,
-    modified: Option<NaiveDateTime>,
-    created: Option<NaiveDateTime>,
-) -> Line<'static> {
+fn footer_line(times: &Times) -> Line<'static> {
     let fmt = |t: NaiveDateTime| super::local_time(t, "%Y-%m-%d %H:%M");
     let mut spans = Vec::new();
-    if expires == Some(true)
-        && let Some(exp) = expiry
+    if times.expires == Some(true)
+        && let Some(exp) = times.expiry
     {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -655,10 +645,10 @@ fn footer_line(
         }
         spans.push(Span::raw(" · ").fg(DIM));
     }
-    if let Some(t) = modified {
+    if let Some(t) = times.last_modification {
         spans.push(Span::raw(format!("modified {}", fmt(t))).fg(DIM));
     }
-    if let Some(t) = created {
+    if let Some(t) = times.creation {
         spans.push(Span::raw(format!(" · created {}", fmt(t))).fg(DIM));
     }
     Line::from(spans)
@@ -765,4 +755,37 @@ fn draw_keys(frame: &mut Frame, app: &App, area: Rect) {
         items.push(btn("q", "quit", act(Action::Quit)));
     }
     key_bar(frame, app, area, items);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_labels_each_time() {
+        let at = |day| {
+            chrono::NaiveDate::from_ymd_opt(2026, 10, day)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+        };
+        // Times is non_exhaustive: no struct literal.
+        let mut times = Times::default();
+        times.creation = Some(at(1));
+        times.last_modification = Some(at(2));
+        times.expires = Some(true);
+        times.expiry = Some(at(3));
+        let line = footer_line(&times);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let shown = |t| super::super::local_time(t, "%Y-%m-%d %H:%M");
+        assert_eq!(
+            text,
+            format!(
+                "expired {} · modified {} · created {}",
+                shown(at(3)),
+                shown(at(2)),
+                shown(at(1))
+            )
+        );
+    }
 }
