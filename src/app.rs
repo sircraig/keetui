@@ -1559,6 +1559,9 @@ impl App {
                 }
             });
         }
+        if form.target.is_some() {
+            v.prune_history(id);
+        }
 
         self.dirty = true;
         self.sel_entry = Some(id);
@@ -2499,6 +2502,63 @@ mod tests {
         let path = app.vault.as_ref().unwrap().path.clone();
         app.vault = Some(Vault::open(&path, "pw", None).unwrap());
         assert_eq!(deleted(&app), [true; 3]);
+    }
+
+    /// Change the selected entry's password through the editor.
+    fn change_password(app: &mut App, password: &str) {
+        app.open_entry_editor(app.sel_entry);
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_PASS].set_text(password);
+        form.modified = true;
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.screen, Screen::Browser), "saving failed");
+    }
+
+    fn history_passwords(app: &App) -> Vec<String> {
+        let v = app.vault.as_ref().unwrap();
+        let e = v.db.entry(app.sel_entry.unwrap()).unwrap();
+        let history = e.history.as_ref().map(|h| h.get_entries().as_slice());
+        history
+            .unwrap_or_default()
+            .iter()
+            .map(|h| h.get_password().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn edits_keep_history_within_the_vaults_limits() {
+        let vault_with = |max_items: Option<isize>, max_size: Option<isize>| {
+            unlocked(move |db| {
+                db.meta.history_max_items = max_items;
+                db.meta.history_max_size = max_size;
+                db.root_mut().add_entry().edit(|e| {
+                    e.set_unprotected(fields::TITLE, "Site");
+                    e.set_protected(fields::PASSWORD, "old-secret");
+                });
+            })
+        };
+
+        let (_dir, mut app) = vault_with(Some(2), Some(-1));
+        for password in ["new-1", "new-2", "new-3"] {
+            change_password(&mut app, password);
+        }
+        assert_eq!(history_passwords(&app), ["new-2", "new-1"], "newest first");
+
+        // No history at all, by count or by size.
+        for (items, size) in [(Some(0), Some(-1)), (Some(-1), Some(0))] {
+            let (_dir, mut app) = vault_with(items, size);
+            change_password(&mut app, "new-1");
+            assert!(history_passwords(&app).is_empty(), "{items:?} {size:?}");
+        }
+
+        // -1 means unlimited.
+        let (_dir, mut app) = vault_with(Some(-1), Some(-1));
+        for password in ["new-1", "new-2", "new-3"] {
+            change_password(&mut app, password);
+        }
+        assert_eq!(history_passwords(&app).len(), 3);
     }
 
     #[test]

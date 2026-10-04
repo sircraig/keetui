@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use keepass::{
     Database, DatabaseKey,
     config::{DatabaseConfig, DatabaseVersion, KdfConfig},
-    db::{DatabaseOpenError, EntryId, GroupId, fields},
+    db::{DatabaseOpenError, Entry, EntryId, GroupId, History, fields},
 };
 use zeroize::Zeroizing;
 
@@ -116,6 +116,42 @@ impl Vault {
     /// with? Lets a locked session resume without re-reading the file.
     pub fn key_matches(&self, password: &str, keyfile: Option<&Path>) -> Result<bool> {
         Ok(build_key(password, keyfile)? == self.key)
+    }
+
+    /// Trim an entry's history to the vault's limits, keeping the newest
+    /// versions, as KeePass and KeePassXC do after every edit (keepass-rs
+    /// never does). A negative limit means unlimited. The size is
+    /// approximate: keepass-rs keeps attachments in a shared pool, so only
+    /// text counts.
+    pub fn prune_history(&mut self, id: EntryId) {
+        let limit = |value: Option<isize>, default| {
+            usize::try_from(value.unwrap_or(default)).unwrap_or(usize::MAX)
+        };
+        let max_items = limit(self.db.meta.history_max_items, DEFAULT_HISTORY_MAX_ITEMS);
+        let max_size = limit(self.db.meta.history_max_size, DEFAULT_HISTORY_MAX_SIZE);
+        let Some(mut e) = self.db.entry_mut(id) else {
+            return;
+        };
+        let Some(history) = e.history.take() else {
+            return;
+        };
+        let mut size = 0;
+        let kept: Vec<Entry> = history
+            .get_entries()
+            .iter()
+            .take(max_items)
+            .take_while(|old| {
+                size += approximate_size(old);
+                size <= max_size
+            })
+            .cloned()
+            .collect();
+        // add_entry puts each version first, so add the oldest first.
+        let mut pruned = History::default();
+        for old in kept.into_iter().rev() {
+            pruned.add_entry(old);
+        }
+        e.history = Some(pruned);
     }
 
     /// The database's format, if keepass-rs can't write it: it only writes
@@ -295,6 +331,20 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     tmp.as_file().sync_all()?;
     tmp.persist(path)?;
     Ok(())
+}
+
+/// KeePass's history limits for vaults that don't set their own.
+const DEFAULT_HISTORY_MAX_ITEMS: isize = 10;
+const DEFAULT_HISTORY_MAX_SIZE: isize = 6 * 1024 * 1024;
+
+/// Roughly how much text an entry holds: field names and values, and tags.
+fn approximate_size(entry: &Entry) -> usize {
+    let fields: usize = entry
+        .fields
+        .iter()
+        .map(|(key, value)| key.len() + value.get().len())
+        .sum();
+    fields + entry.tags.iter().map(String::len).sum::<usize>()
 }
 
 fn backup_path(path: &Path) -> PathBuf {
