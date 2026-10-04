@@ -100,7 +100,9 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
         let cur_line = before.matches('\n').count();
         let cur_col = before.rsplit('\n').next().unwrap_or("").chars().count();
         let top = (cur_line + 1).saturating_sub(notes_h as usize);
-        let hscroll = (cur_col + 1).saturating_sub(value_w as usize);
+        // At least one column, as scroll_window does: with none (a very
+        // narrow terminal) the cursor arithmetic below would underflow.
+        let hscroll = (cur_col + 1).saturating_sub(usize::from(value_w.max(1)));
         let lines: Vec<Line> = field
             .text
             .split('\n')

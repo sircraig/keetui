@@ -2817,6 +2817,24 @@ mod tests {
     }
 
     #[test]
+    fn editor_survives_narrow_and_short_terminals() {
+        let (_dir, mut app) = unlocked(|_| {});
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.focus = F_NOTES;
+        form.fields[F_NOTES].set_text("some notes\nsecond line");
+        for width in 1..=40 {
+            for height in [1, 5, 12, 20, 30] {
+                let backend = ratatui::backend::TestBackend::new(width, height);
+                let mut terminal = ratatui::Terminal::new(backend).unwrap();
+                terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn unusable_totp_settings_do_not_crash() {
         let (_dir, mut app) = unlocked(|db| {
             db.root_mut().add_entry().edit(|e| {
