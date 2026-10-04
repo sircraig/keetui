@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use crate::app::{
@@ -13,11 +13,9 @@ use crate::app::{
 };
 
 use super::{
-    ACCENT, DIM, ERR, OK, WARN, btn, buttons, centered, ctrl, hit, key, mask, scroll_window,
-    truncate,
+    ACCENT, DIM, ERR, FORM_LABEL_W, OK, WARN, btn, buttons, centered, ctrl, field_label, hit, key,
+    mask, scroll_window, truncate,
 };
-
-const LABEL_W: u16 = 11;
 
 /// The bordered box shared by both screens; returns its padded inner area.
 fn panel(frame: &mut Frame, h: u16, title: &'static str) -> Option<Rect> {
@@ -182,7 +180,7 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
                 ("✗ differs", ERR)
             };
             let w = mark.chars().count() as u16;
-            if r.width > LABEL_W + w + 8 {
+            if r.width > FORM_LABEL_W + w + 8 {
                 frame.render_widget(
                     Paragraph::new(Span::raw(mark).fg(color)),
                     Rect::new(r.right() - w, r.y, w, 1),
@@ -240,16 +238,8 @@ fn input_row(
     placeholder: Option<&str>,
 ) -> Position {
     hit(app, row, Hit::LoginField(index));
-    let label = if focused {
-        Line::from(vec![
-            Span::raw("▌").fg(ACCENT),
-            Span::raw(label.to_string()).fg(ACCENT).bold(),
-        ])
-    } else {
-        Line::from(vec![Span::raw(" "), Span::raw(label.to_string()).fg(DIM)])
-    };
-    frame.render_widget(Paragraph::new(label), row);
-    let x = row.x + LABEL_W;
+    field_label(frame, row, label, focused);
+    let x = row.x + FORM_LABEL_W;
     let w = row.right().saturating_sub(x);
     let (shown, col) = scroll_window(chars, field.cursor, w as usize);
     let value = match placeholder {

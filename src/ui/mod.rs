@@ -66,6 +66,30 @@ fn modal_begin(app: &App) {
     app.hits.borrow_mut().clear();
 }
 
+/// Width of the label column in forms: the entry and group editors and
+/// the unlock and new-database screens.
+pub(crate) const FORM_LABEL_W: u16 = 11;
+
+/// A form field's label: an accent bar and bold when focused, dim otherwise.
+pub(crate) fn field_label(frame: &mut Frame, row: Rect, name: &str, focused: bool) {
+    let line = if focused {
+        Line::from(vec![
+            Span::raw("▌").fg(ACCENT),
+            Span::raw(name.to_string()).fg(ACCENT).bold(),
+        ])
+    } else {
+        Line::from(vec![Span::raw(" "), Span::raw(name.to_string()).fg(DIM)])
+    };
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect {
+            height: 1,
+            width: FORM_LABEL_W.min(row.width),
+            ..row
+        },
+    );
+}
+
 /// A click that replays a key press.
 pub(crate) fn key(code: KeyCode) -> Hit {
     Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
