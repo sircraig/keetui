@@ -44,6 +44,10 @@ impl Vault {
         // target instead of replacing the link with a regular file.
         let path =
             fs::canonicalize(path).with_context(|| format!("cannot read {}", path.display()))?;
+        // Reading a FIFO or a device would block forever or never end.
+        if !fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            return Err(anyhow!("{} is not a regular file", path.display()));
+        }
         let data = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let key = build_key(password, keyfile)?;
         let db = Database::parse(&data, key.clone()).map_err(friendly_open_error)?;
@@ -328,6 +332,23 @@ mod tests {
         assert_eq!(Vault::open(&real, "pw", None).unwrap().db.num_entries(), 2);
         assert!(dir.path().join("sync/v.kdbx.bak").is_file());
         assert!(!dir.path().join("v.kdbx.bak").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_open_fifos_and_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.kdbx");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            // Would block forever in fs::read without the check.
+            let err = Vault::open(&fifo, "pw", None).err().unwrap();
+            assert!(format!("{err:#}").contains("not a regular file"));
+        }
+        let err = Vault::open(Path::new("/dev/zero"), "pw", None)
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("not a regular file"));
     }
 
     #[test]
