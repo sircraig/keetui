@@ -272,10 +272,7 @@ fn expand_home(s: &str) -> PathBuf {
 
 fn resolve_db_path(s: &str) -> PathBuf {
     let mut path = expand_home(s.trim());
-    if path
-        .extension()
-        .is_none_or(|e| !e.eq_ignore_ascii_case("kdbx"))
-    {
+    if !picker::is_kdbx(&path) {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".kdbx");
         path.set_file_name(name);
@@ -2172,7 +2169,8 @@ fn minutes(d: Duration) -> String {
     }
 }
 
-fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
+/// Move `idx` by `delta` within a list of `len` rows.
+pub(crate) fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
         return 0;
     }
