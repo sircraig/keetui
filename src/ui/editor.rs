@@ -7,7 +7,9 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::app::{App, ENTRY_FIELD_LABELS, EntryForm, F_NOTES, F_OTP, F_PASS, GroupForm, Hit};
 
-use super::{ACCENT, DIM, btn, buttons, buttons_right, centered, hit, mask, scroll_window};
+use super::{
+    ACCENT, DIM, btn, buttons, buttons_right, centered, hit, mask, scroll_window, skip_cells, width,
+};
 
 const LABEL_W: u16 = 11;
 
@@ -98,7 +100,9 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
         let field = &form.fields[F_NOTES];
         let before: String = field.text.chars().take(field.cursor).collect();
         let cur_line = before.matches('\n').count();
-        let cur_col = before.rsplit('\n').next().unwrap_or("").chars().count();
+        // Columns are terminal cells: CJK characters take two.
+        let cur_prefix = before.rsplit('\n').next().unwrap_or("");
+        let cur_col = usize::from(width(cur_prefix));
         let top = (cur_line + 1).saturating_sub(notes_h as usize);
         // At least one column, as scroll_window does: with none (a very
         // narrow terminal) the cursor arithmetic below would underflow.
@@ -108,7 +112,7 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
             .split('\n')
             .skip(top)
             .take(notes_h as usize)
-            .map(|l| Line::raw(l.chars().skip(hscroll).collect::<String>()))
+            .map(|l| Line::raw(skip_cells(l, hscroll).0.to_string()))
             .collect();
         let empty = field.text.is_empty();
         let body = if empty && !focused {
@@ -118,8 +122,9 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
         };
         frame.render_widget(body, Rect::new(value_x, notes_y, value_w, notes_h));
         if focused {
+            let skipped = skip_cells(cur_prefix, hscroll).1;
             cursor = Some(Position::new(
-                value_x + (cur_col - hscroll) as u16,
+                value_x + cur_col.saturating_sub(skipped) as u16,
                 notes_y + (cur_line - top) as u16,
             ));
         }

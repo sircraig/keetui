@@ -2896,6 +2896,47 @@ mod tests {
     }
 
     #[test]
+    fn wide_group_names_dont_cover_the_entry_buttons() {
+        let (_dir, mut app) = unlocked(|db| {
+            let mut root = db.root_mut();
+            let mut cards = root.add_group();
+            cards.name = "クレジットカード".into();
+            cards
+                .add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "Visa"));
+        });
+        let cards = {
+            let db = &app.vault.as_ref().unwrap().db;
+            db.root().group_by_name("クレジットカード").unwrap().id()
+        };
+        app.select_group(cards);
+        app.on_key(key(KeyCode::Tab));
+        assert!(draw_at(&app, 80, 24).contains("[e edit] [d delete]"));
+    }
+
+    #[test]
+    fn the_save_button_is_clickable_where_it_is_drawn() {
+        let (_dir, mut app) = lockable();
+        let v = app.vault.as_mut().unwrap();
+        v.path = v.path.with_file_name("パスワード.kdbx");
+        app.dirty = true;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let status_row = 22;
+        let marker = (0..80)
+            .find(|&x| buffer[(x, status_row)].symbol() == "●")
+            .expect("unsaved marker drawn");
+        let save = app
+            .hits
+            .borrow()
+            .iter()
+            .find_map(|(rect, hit)| matches!(hit, Hit::Act(Action::Save)).then_some(*rect));
+        assert_eq!(save.map(|r| r.x), Some(marker));
+    }
+
+    #[test]
     fn unusable_totp_settings_do_not_crash() {
         let (_dir, mut app) = unlocked(|db| {
             db.root_mut().add_entry().edit(|e| {

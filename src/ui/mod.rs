@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Hit, Screen};
 
@@ -106,8 +107,13 @@ pub(crate) fn mask(len: usize) -> String {
 /// Placeholder for a stored secret; fixed width so it doesn't leak length.
 pub(crate) const HIDDEN: &str = "••••••••";
 
+/// Terminal cells taken by `s`: a CJK character takes two.
 pub(crate) fn width(s: &str) -> u16 {
-    s.chars().count() as u16
+    u16::try_from(s.width()).unwrap_or(u16::MAX)
+}
+
+fn char_width(c: char) -> usize {
+    c.width().unwrap_or(0)
 }
 
 /// Format a UTC timestamp (keepass stores them in UTC) in local time.
@@ -122,26 +128,64 @@ where
     zone.from_utc_datetime(&utc).format(format).to_string()
 }
 
-/// Truncate to `max` chars, marking the cut with an ellipsis.
+/// Truncate to `max` terminal cells, marking the cut with an ellipsis.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if s.width() <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out: String = s.chars().take(max - 1).collect();
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = char_width(c);
+        if used + w > max - 1 {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
     out.push('…');
     out
 }
 
-/// The slice of a single-line value that fits in `width` columns while
-/// keeping the cursor visible, plus the cursor's column within it.
+/// `s` without its first `cells` terminal cells (a wide character
+/// straddling the cut goes too), and how many cells were dropped.
+pub(crate) fn skip_cells(s: &str, cells: usize) -> (&str, usize) {
+    let mut skipped = 0;
+    for (i, c) in s.char_indices() {
+        if skipped >= cells {
+            return (&s[i..], skipped);
+        }
+        skipped += char_width(c);
+    }
+    ("", skipped)
+}
+
+/// The slice of a single-line value that fits in `width` terminal cells
+/// while keeping the cursor visible, plus the cursor's column within it.
 pub(crate) fn scroll_window(chars: &[char], cursor: usize, width: usize) -> (String, usize) {
     let width = width.max(1);
-    let start = (cursor + 1).saturating_sub(width);
-    let text = chars.iter().skip(start).take(width).collect();
-    (text, cursor - start)
+    // Start just late enough for the text before the cursor, and the
+    // cursor's own cell, to fit.
+    let mut start = 0;
+    let mut before: usize = chars[..cursor].iter().map(|&c| char_width(c)).sum();
+    while before + 1 > width && start < cursor {
+        before -= char_width(chars[start]);
+        start += 1;
+    }
+    let mut text = String::new();
+    let mut used = 0;
+    for &c in &chars[start..] {
+        let w = char_width(c);
+        if used + w > width {
+            break;
+        }
+        text.push(c);
+        used += w;
+    }
+    (text, before)
 }
 
 /// A clickable button, `[key label]`. Returns its width.
@@ -277,6 +321,37 @@ mod tests {
         );
         // Late evening UTC is already the next day here.
         assert_eq!(in_zone(at(20), &utc_plus_8, "%Y-%m-%d"), "2026-10-05");
+    }
+
+    /// Terminal cells, as ratatui measures them.
+    fn cells(s: &str) -> usize {
+        Span::raw(s).width()
+    }
+
+    #[test]
+    fn measures_terminal_cells_not_chars() {
+        let mut wrong = Vec::new();
+        // CJK characters take two cells each.
+        if width("クレ") != 4 {
+            wrong.push(format!("width(\"クレ\") = {}", width("クレ")));
+        }
+        let cut = truncate("in クレジットカード", 12);
+        if cells(&cut) > 12 || !cut.ends_with('…') {
+            wrong.push(format!(
+                "truncate to 12 gave {cut:?}, {} cells",
+                cells(&cut)
+            ));
+        }
+        let chars: Vec<char> = "パスワード".chars().collect();
+        let (shown, col) = scroll_window(&chars, chars.len(), 6);
+        if cells(&shown) >= 6 || col != cells(&shown) {
+            wrong.push(format!("scroll_window(6) gave {shown:?}, cursor at {col}"));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+
+        assert_eq!(skip_cells("クレジット", 4), ("ジット", 4));
+        // A wide character straddling the cut is dropped whole.
+        assert_eq!(skip_cells("クレジット", 3), ("ジット", 4));
     }
 
     #[test]
