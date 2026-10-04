@@ -1131,6 +1131,8 @@ dependencies = [
  "keepass",
  "rand 0.9.5",
  "ratatui",
+ "rustix",
+ "signal-hook",
  "tempfile",
  "zeroize",
 ]

@@ -1,17 +1,17 @@
 use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
-use ratatui::Frame;
 
 use crate::app::{App, Hit};
-use crate::picker::{size_label, tilde, ItemKind, PickerState};
+use crate::picker::{ItemKind, PickerState, size_label, tilde};
 
-use super::{btn, buttons, centered, hit, scroll_window, selection_style, width, ACCENT, DIM, ERR};
+use super::{ACCENT, DIM, ERR, btn, buttons, centered, hit, scroll_window, selection_style, width};
 
 fn key(code: KeyCode, mods: KeyModifiers) -> Hit {
     Hit::Key(KeyEvent::new(code, mods))
@@ -46,7 +46,10 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     let filter_row = row(1);
     let prompt = Span::raw("/ ").fg(ACCENT).bold();
     let line = if st.filter.is_empty() {
-        Line::from(vec![prompt, Span::raw("type to filter · ~ home · / root").fg(DIM)])
+        Line::from(vec![
+            prompt,
+            Span::raw("type to filter · ~ home · / root").fg(DIM),
+        ])
     } else {
         Line::from(vec![prompt, Span::raw(st.filter.clone())])
     };
@@ -70,7 +73,13 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     }
     st.offset.set(offset);
 
-    for (r, (vi, &ii)) in visible.iter().enumerate().skip(offset).take(list.height as usize).enumerate() {
+    for (r, (vi, &ii)) in visible
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list.height as usize)
+        .enumerate()
+    {
         let item = &st.items[ii];
         let rect = Rect::new(list.x, list.y + r as u16, list.width, 1);
         let name = match item.kind {
@@ -79,7 +88,9 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
                 Span::raw("▸ ").fg(DIM),
                 Span::raw(format!("{}/", item.name)).fg(ACCENT),
             ]),
-            ItemKind::File => Line::from(vec![Span::raw("  "), Span::raw(item.name.clone()).bold()]),
+            ItemKind::File => {
+                Line::from(vec![Span::raw("  "), Span::raw(item.name.clone()).bold()])
+            }
         };
         frame.render_widget(Paragraph::new(name), rect);
         if item.kind == ItemKind::File {
@@ -136,7 +147,11 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     };
     frame.render_widget(Paragraph::new(line), status);
 
-    let back = if app.db_path.is_file() { "back" } else { "quit" };
+    let back = if app.db_path.is_file() {
+        "back"
+    } else {
+        "quit"
+    };
     buttons(
         frame,
         app,
@@ -146,7 +161,11 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
         vec![
             btn("⏎", "open", key(KeyCode::Enter, KeyModifiers::NONE)),
             btn("⌫", "up", key(KeyCode::Left, KeyModifiers::NONE)),
-            btn("^n", "new database", key(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            btn(
+                "^n",
+                "new database",
+                key(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            ),
             btn(
                 "^a",
                 if st.show_all { "kdbx only" } else { "show all" },

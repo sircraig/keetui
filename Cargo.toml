@@ -2,6 +2,7 @@
 name = "keetui"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 description = "A KeePass-compatible TUI password manager"
 license = "MIT"
 repository = "https://github.com/sircraig/keetui"
@@ -15,6 +16,10 @@ rand = "0.9"
 anyhow = "1"
 tempfile = "3"
 chrono = { version = "0.4", default-features = false }
+signal-hook = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["process"] }
 
 [profile.release]
 strip = true

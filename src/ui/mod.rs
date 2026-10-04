@@ -4,11 +4,11 @@ mod overlays;
 mod picker;
 mod unlock;
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::app::{App, Hit, Screen};
 
@@ -58,9 +58,14 @@ pub(crate) fn hovered(app: &App, rect: Rect) -> bool {
 /// Style of the selected row in a list.
 pub(crate) fn selection_style(focused: bool) -> Style {
     if focused {
-        Style::new().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new()
+            .fg(Color::Black)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(Color::Reset).add_modifier(Modifier::REVERSED)
+        Style::new()
+            .fg(Color::Reset)
+            .add_modifier(Modifier::REVERSED)
     }
 }
 
@@ -111,7 +116,15 @@ pub(crate) fn scroll_window(chars: &[char], cursor: usize, width: usize) -> (Str
 }
 
 /// A clickable button, `[key label]`. Returns its width.
-pub(crate) fn button(frame: &mut Frame, app: &App, x: u16, y: u16, key: &str, label: &str, h: Hit) -> u16 {
+pub(crate) fn button(
+    frame: &mut Frame,
+    app: &App,
+    x: u16,
+    y: u16,
+    key: &str,
+    label: &str,
+    h: Hit,
+) -> u16 {
     let text = if key.is_empty() {
         format!("[{label}]")
     } else {
@@ -145,7 +158,11 @@ pub(crate) fn btn<'a>(key: &'a str, label: &'a str, hit: Hit) -> Btn<'a> {
 }
 
 fn btn_width(b: &Btn) -> u16 {
-    let key = if b.key.is_empty() { 0 } else { width(b.key) + 1 };
+    let key = if b.key.is_empty() {
+        0
+    } else {
+        width(b.key) + 1
+    };
     key + width(b.label) + 2
 }
 
@@ -187,7 +204,11 @@ pub(crate) fn key_bar(frame: &mut Frame, app: &App, area: Rect, items: Vec<Btn>)
         }
         let rect = Rect::new(x, area.y, w, 1);
         let line = if hovered(app, rect) {
-            Line::from(Span::raw(format!("{} {}", item.key, item.label)).fg(Color::Black).bg(ACCENT))
+            Line::from(
+                Span::raw(format!("{} {}", item.key, item.label))
+                    .fg(Color::Black)
+                    .bg(ACCENT),
+            )
         } else {
             Line::from(vec![
                 Span::raw(item.key.to_string()).fg(ACCENT).bold(),

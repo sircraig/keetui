@@ -13,6 +13,7 @@ KeePassXC.
 keetui                                       # browse for a database
 keetui /path/to/vault.kdbx
 keetui /path/to/vault.kdbx --keyfile /path/to/key
+keetui /path/to/vault.kdbx --lock-after 10   # lock after 10 idle minutes (0 = never)
 ```
 
 ### Opening a database
@@ -34,9 +35,10 @@ New databases are KDBX4 with Argon2d (64 MiB), and KeePassXC can open them.
 
 ### Browsing
 
-Unlock with the master password (and optional key file). The screen has three
-panes — groups, entries, and the selected entry — with a key bar at the bottom
-that shows what you can do right now (every item in it is clickable).
+Unlock with the master password (and optional key file); `Esc` cancels an
+unlock that is taking too long. The screen has three panes — groups, entries,
+and the selected entry — with a key bar at the bottom that shows what you can
+do right now (every item in it is clickable).
 
 | Key | Action |
 |---|---|
@@ -54,11 +56,22 @@ that shows what you can do right now (every item in it is clickable).
 | `d` | delete (to recycle bin when the database has one) |
 | `Ctrl-g` | password generator |
 | `Ctrl-s` | save |
+| `Ctrl-l` | lock |
 | `q` | quit (prompts when there are unsaved changes) |
 | `?` | help |
 
 Search covers all groups (recycle bin excluded); space-separated words must all
 match. Going back to the groups pane ends the search.
+
+### Locking
+
+keetui locks itself after 5 minutes without a key press, click or scroll
+(`--lock-after MINUTES`; `0` turns this off), and `Ctrl-l` locks it right
+away. Locking forgets the decrypted database: unlocking reads it from disk
+again and returns to where you were. If there are unsaved changes, they are
+kept in memory behind the master password instead, so nothing is lost, and
+quitting from the lock screen offers to save them. A revealed password hides
+itself again after 30 seconds.
 
 ### Mouse
 
@@ -71,37 +84,55 @@ the terminal instead, or start with `--no-mouse`.
 
 ### Entry editor
 
-`Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password, `Ctrl-g`
-generates one, `Ctrl-u` clears the field, `Ctrl-s` saves the entry, `Esc`
-cancels. The OTP field accepts an `otpauth://` URL or a bare base32 secret
-(stored KeePassXC-compatibly). Custom fields, tags and attachments are shown
-read-only and kept intact when editing.
+`Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password and TOTP secret
+(both are masked otherwise), `Ctrl-g` generates a password, `Ctrl-u` clears
+the field, `Ctrl-s` saves the entry, `Esc` cancels. Pasting inserts into the
+focused field (line breaks are kept only in Notes); outside a text field or
+the search box a paste is ignored, so pasted text never runs as commands. The
+OTP field accepts an `otpauth://` URL or a bare base32 secret (stored
+KeePassXC-compatibly). Custom fields, tags and attachments are shown read-only
+and kept intact when editing.
 
 URLs without a scheme open as `https://`. `cmd://`, `file://` and other
-non-web schemes are refused.
+non-web schemes are refused, and `mailto:` links open without their query
+part (some mail clients would attach local files named in it).
 
 ## Saving
 
 Saves are atomic: the database is serialized, verified by re-parsing, the old
-file is copied to `<name>.kdbx.bak`, and the new file replaces the original
-via rename. A database opened from a KDBX3 file is written back as KDBX4
-(KeePassXC-compatible) with the same Argon2d settings as new databases, after
-a one-time confirmation.
+file is backed up to `<name>.kdbx.bak`, and the new file replaces the original
+via rename (each written to a fresh file first, so a symlink in the way is
+replaced, never written through). A vault opened through a symlink is saved to
+the link's target. If another program changed the file since keetui opened or
+last saved it, keetui asks before overwriting those changes. A database opened
+from a KDBX3 file is written back as KDBX4 (KeePassXC-compatible) with the
+same Argon2d settings as new databases, after a one-time confirmation.
 
 Entry edits record the previous version in KeePass history, like KeePassXC.
 
 ## Clipboard
 
-Copies go through `wl-copy` (Wayland required) and auto-clear after 15
-seconds. Caveat: if you copy something else in another application during
-those 15 seconds, the auto-clear will clear that too.
+Copies go through `wl-copy` (Wayland required) and are marked sensitive
+(`--sensitive`, wl-clipboard 2.3+), so clipboard history managers that honor
+the hint don't record them. They auto-clear after 15 seconds, or as soon as
+keetui exits — on quit, on a crash, or when the terminal is closed — since
+`wl-copy` would otherwise keep serving the secret. Caveat: if you copy
+something else in another application during those 15 seconds, the auto-clear
+will clear that too.
 
 ## Security notes
 
-Proportionate to a personal tool: the master password and form buffers are
-zeroized after use, protected fields stay encrypted in memory via the keepass
-crate, secrets are piped (never passed as arguments), and nothing is logged.
-No mlock/swap hardening — use full-disk encryption and encrypted swap.
+Proportionate to a personal tool. While a vault is open, its contents are in
+memory as plain text: the keepass crate keeps protected fields (passwords,
+TOTP secrets) in buffers that are wiped when freed, but does not encrypt
+them. keetui wipes the master password, the key file and form buffers when
+it is done with them, and sizes those buffers so typing doesn't leave copies
+behind; text shown on screen also passes through the terminal library's
+buffers, which are not wiped. Core dumps are disabled and the process is
+marked non-dumpable, so a crash can't write decrypted secrets to disk and
+other processes of the same user can't read keetui's memory. Secrets are
+piped to `wl-copy` (never passed as arguments), and nothing is logged. No
+mlock/swap hardening — use full-disk encryption and encrypted swap.
 
 ## Development
 

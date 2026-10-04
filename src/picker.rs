@@ -84,7 +84,9 @@ impl PickerState {
                 let meta = fs::metadata(&path).ok()?;
                 let kind = if meta.is_dir() {
                     ItemKind::Dir
-                } else if self.show_all || is_kdbx(&path) {
+                // Regular files only: reading a FIFO or device named *.kdbx
+                // would block (or never end).
+                } else if meta.is_file() && (self.show_all || is_kdbx(&path)) {
                     ItemKind::File
                 } else {
                     return None;
@@ -269,11 +271,14 @@ impl PickerState {
 }
 
 pub fn is_kdbx(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("kdbx"))
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("kdbx"))
 }
 
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `~/x` style display of a path under the home directory.
@@ -314,7 +319,10 @@ mod tests {
     }
 
     fn names(st: &PickerState) -> Vec<String> {
-        st.visible().iter().map(|&i| st.items[i].name.clone()).collect()
+        st.visible()
+            .iter()
+            .map(|&i| st.items[i].name.clone())
+            .collect()
     }
 
     #[test]
@@ -330,7 +338,29 @@ mod tests {
         let dir = setup();
         let mut st = PickerState::new(dir.path(), None);
         st.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL), 10);
-        assert_eq!(names(&st), ["..", ".hidden", "vaults", "notes.txt", "Work.kdbx"]);
+        assert_eq!(
+            names(&st),
+            ["..", ".hidden", "vaults", "notes.txt", "Work.kdbx"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn never_lists_fifos_or_devices() {
+        let dir = setup();
+        let fifo = dir.path().join("pipe.kdbx");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !made.is_ok_and(|s| s.success()) {
+            return; // no mkfifo here
+        }
+        let mut st = PickerState::new(dir.path(), None);
+        assert!(!names(&st).contains(&"pipe.kdbx".to_string()));
+        st.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL), 10);
+        assert!(!names(&st).contains(&"pipe.kdbx".to_string()));
+
+        let mut st = PickerState::new(Path::new("/dev"), None);
+        st.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL), 10);
+        assert!(!names(&st).contains(&"zero".to_string()));
     }
 
     #[test]

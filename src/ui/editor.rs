@@ -1,13 +1,13 @@
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
-use ratatui::Frame;
 
-use crate::app::{App, EntryForm, GroupForm, Hit, ENTRY_FIELD_LABELS, F_NOTES, F_OTP, F_PASS};
+use crate::app::{App, ENTRY_FIELD_LABELS, EntryForm, F_NOTES, F_OTP, F_PASS, GroupForm, Hit};
 
-use super::{btn, buttons, buttons_right, centered, hit, mask, scroll_window, ACCENT, DIM};
+use super::{ACCENT, DIM, btn, buttons, buttons_right, centered, hit, mask, scroll_window};
 
 const LABEL_W: u16 = 11;
 
@@ -30,7 +30,11 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
     let area = frame.area();
     let modal = centered(80, 22, area);
     frame.render_widget(Clear, modal);
-    let title = if form.target.is_some() { " Edit entry " } else { " New entry " };
+    let title = if form.target.is_some() {
+        " Edit entry "
+    } else {
+        " New entry "
+    };
     let block = modal_block(title);
     let inner = block.inner(modal).inner(Margin::new(1, 1));
     frame.render_widget(block, modal);
@@ -68,7 +72,10 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
             w = bx.saturating_sub(value_x + 1);
         }
         let field = &form.fields[i];
-        let chars: Vec<char> = if i == F_PASS && !form.reveal {
+        // The TOTP secret is as sensitive as the password: anyone who sees it
+        // can generate codes indefinitely.
+        let secret = i == F_PASS || i == F_OTP;
+        let chars: Vec<char> = if secret && !form.reveal {
             mask(field.text.chars().count()).chars().collect()
         } else {
             field.text.chars().collect()
@@ -124,10 +131,13 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
         inner.x,
         footer_y,
         inner.right(),
-        vec![btn("^s", "save", ctrl('s')), btn("esc", "cancel", key(KeyCode::Esc))],
+        vec![
+            btn("^s", "save", ctrl('s')),
+            btn("esc", "cancel", key(KeyCode::Esc)),
+        ],
     );
     let hint = match form.focus {
-        F_OTP => "otpauth:// URL or base32 secret",
+        F_OTP => "otpauth:// URL or base32 secret · ^r show",
         F_NOTES => "⏎ new line · tab next field",
         _ => "tab/↑↓ next field · ^u clear",
     };
@@ -147,18 +157,32 @@ pub fn draw_entry(frame: &mut Frame, app: &App, form: &EntryForm) {
 
 fn draw_label(frame: &mut Frame, row: Rect, name: &str, focused: bool) {
     let line = if focused {
-        Line::from(vec![Span::raw("▌").fg(ACCENT), Span::raw(name.to_string()).fg(ACCENT).bold()])
+        Line::from(vec![
+            Span::raw("▌").fg(ACCENT),
+            Span::raw(name.to_string()).fg(ACCENT).bold(),
+        ])
     } else {
         Line::from(vec![Span::raw(" "), Span::raw(name.to_string()).fg(DIM)])
     };
-    frame.render_widget(Paragraph::new(line), Rect { height: 1, width: LABEL_W.min(row.width), ..row });
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect {
+            height: 1,
+            width: LABEL_W.min(row.width),
+            ..row
+        },
+    );
 }
 
 pub fn draw_group(frame: &mut Frame, app: &App, form: &GroupForm) {
     let area = frame.area();
     let modal = centered(56, 8, area);
     frame.render_widget(Clear, modal);
-    let title = if form.target.is_some() { " Rename group " } else { " New group " };
+    let title = if form.target.is_some() {
+        " Rename group "
+    } else {
+        " New group "
+    };
     let block = modal_block(title);
     let inner = block.inner(modal).inner(Margin::new(1, 1));
     frame.render_widget(block, modal);
@@ -170,12 +194,23 @@ pub fn draw_group(frame: &mut Frame, app: &App, form: &GroupForm) {
         .vault
         .as_ref()
         .map(|v| v.group_path(form.parent))
-        .map(|p| if p.is_empty() { "(root)".to_string() } else { p })
+        .map(|p| {
+            if p.is_empty() {
+                "(root)".to_string()
+            } else {
+                p
+            }
+        })
         .unwrap_or_default();
     if form.target.is_none() {
         frame.render_widget(
             Paragraph::new(Span::raw(format!("inside {parent}")).fg(DIM).italic()),
-            Rect::new(inner.x + LABEL_W, inner.y + 1, inner.width.saturating_sub(LABEL_W), 1),
+            Rect::new(
+                inner.x + LABEL_W,
+                inner.y + 1,
+                inner.width.saturating_sub(LABEL_W),
+                1,
+            ),
         );
     }
 
@@ -184,7 +219,10 @@ pub fn draw_group(frame: &mut Frame, app: &App, form: &GroupForm) {
     let w = inner.width.saturating_sub(LABEL_W);
     let chars: Vec<char> = form.name.text.chars().collect();
     let (shown, col) = scroll_window(&chars, form.name.cursor, w as usize);
-    frame.render_widget(Paragraph::new(shown), Rect::new(inner.x + LABEL_W, inner.y, w, 1));
+    frame.render_widget(
+        Paragraph::new(shown),
+        Rect::new(inner.x + LABEL_W, inner.y, w, 1),
+    );
     frame.set_cursor_position(Position::new(inner.x + LABEL_W + col as u16, inner.y));
 
     buttons(
@@ -193,6 +231,9 @@ pub fn draw_group(frame: &mut Frame, app: &App, form: &GroupForm) {
         inner.x,
         inner.bottom() - 1,
         inner.right(),
-        vec![btn("⏎", "save", key(KeyCode::Enter)), btn("esc", "cancel", key(KeyCode::Esc))],
+        vec![
+            btn("⏎", "save", key(KeyCode::Enter)),
+            btn("esc", "cancel", key(KeyCode::Esc)),
+        ],
     );
 }

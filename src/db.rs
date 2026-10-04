@@ -5,31 +5,58 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use keepass::{
-    config::{DatabaseConfig, DatabaseVersion, KdfConfig},
-    db::{fields, DatabaseOpenError, EntryId, GroupId},
     Database, DatabaseKey,
+    config::{DatabaseConfig, DatabaseVersion, KdfConfig},
+    db::{DatabaseOpenError, EntryId, GroupId, fields},
 };
+use zeroize::Zeroizing;
 
 pub struct Vault {
     pub db: Database,
     // Retained for the whole session because `Database::save` requires the key
     // again. DatabaseKey is ZeroizeOnDrop.
     key: DatabaseKey,
+    /// The real file, symlinks resolved.
     pub path: PathBuf,
+    /// The (encrypted) file contents as last read or written, to notice when
+    /// another program changes the file underneath us.
+    on_disk: Vec<u8>,
 }
+
+/// Saving would overwrite changes another program (KeePassXC, a sync
+/// client, a second keetui) made to the file since keetui read it.
+#[derive(Debug)]
+pub struct ChangedOnDisk;
+
+impl std::fmt::Display for ChangedOnDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the file was changed by another program since it was opened")
+    }
+}
+
+impl std::error::Error for ChangedOnDisk {}
 
 impl Vault {
     pub fn open(path: &Path, password: &str, keyfile: Option<&Path>) -> Result<Self> {
-        let data = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+        // Work on the real file, so that saving through a symlink updates its
+        // target instead of replacing the link with a regular file.
+        let path =
+            fs::canonicalize(path).with_context(|| format!("cannot read {}", path.display()))?;
+        // Reading a FIFO or a device would block forever or never end.
+        if !fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            return Err(anyhow!("{} is not a regular file", path.display()));
+        }
+        let data = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let key = build_key(password, keyfile)?;
         let db = Database::parse(&data, key.clone()).map_err(friendly_open_error)?;
 
         Ok(Vault {
             db,
             key,
-            path: path.to_path_buf(),
+            path,
+            on_disk: data,
         })
     }
 
@@ -54,9 +81,16 @@ impl Vault {
             db,
             key,
             path: path.to_path_buf(),
+            on_disk: Vec::new(),
         };
         vault.save()?;
         Ok(vault)
+    }
+
+    /// Does this password and key file make the key the vault was opened
+    /// with? Lets a locked session resume without re-reading the file.
+    pub fn key_matches(&self, password: &str, keyfile: Option<&Path>) -> Result<bool> {
+        Ok(build_key(password, keyfile)? == self.key)
     }
 
     /// The database was opened from a pre-KDBX4 file and will be converted on save.
@@ -65,7 +99,18 @@ impl Vault {
     }
 
     /// Serialize, verify, back up the old file, then atomically replace it.
+    /// Fails with [`ChangedOnDisk`] if another program changed the file.
     pub fn save(&mut self) -> Result<()> {
+        self.write(false)
+    }
+
+    /// Save even though another program changed the file since keetui read
+    /// it, discarding those changes (the old file still goes to the backup).
+    pub fn save_overwriting(&mut self) -> Result<()> {
+        self.write(true)
+    }
+
+    fn write(&mut self, overwrite: bool) -> Result<()> {
         if self.needs_kdbx4_upgrade() {
             // The crate can only write KDBX4; adopt keetui's config for new files.
             self.db.config = new_db_config();
@@ -77,25 +122,24 @@ impl Vault {
             .context("failed to serialize database")?;
 
         // Verify the output reopens before touching the file on disk.
-        Database::parse(&buf, self.key.clone())
-            .map_err(|e| anyhow!("verification of saved data failed ({e}); original file untouched"))?;
+        Database::parse(&buf, self.key.clone()).map_err(|e| {
+            anyhow!("verification of saved data failed ({e}); original file untouched")
+        })?;
 
         if self.path.is_file() {
+            let old = fs::read(&self.path)
+                .with_context(|| format!("cannot read {}", self.path.display()))?;
+            // Checked as late as possible, right before replacing the file.
+            if !overwrite && old != self.on_disk {
+                return Err(ChangedOnDisk.into());
+            }
             let bak = backup_path(&self.path);
-            fs::copy(&self.path, &bak)
+            write_atomic(&bak, &old)
                 .with_context(|| format!("failed to write backup {}", bak.display()))?;
         }
-
-        let dir = match self.path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        // NamedTempFile is created 0600 on unix.
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).context("failed to create temp file")?;
-        tmp.write_all(&buf)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(&self.path)
+        write_atomic(&self.path, &buf)
             .with_context(|| format!("failed to replace {}", self.path.display()))?;
+        self.on_disk = buf;
 
         Ok(())
     }
@@ -187,13 +231,31 @@ fn build_key(password: &str, keyfile: Option<&Path>) -> Result<DatabaseKey> {
         key = key.with_password(password);
     }
     if let Some(kf) = keyfile {
-        let kf_data = fs::read(kf).with_context(|| format!("cannot read key file {}", kf.display()))?;
+        let kf_data = Zeroizing::new(
+            fs::read(kf).with_context(|| format!("cannot read key file {}", kf.display()))?,
+        );
         key = key.with_keyfile(&mut kf_data.as_slice())?;
     }
     if key.is_empty() {
         return Err(anyhow!("a password or key file is required"));
     }
     Ok(key)
+}
+
+/// Write `data` to a fresh temp file next to `path` (0600 on unix) and
+/// rename it over `path`. Readers see the old or the new file, never a
+/// partial one, and a symlink at `path` is replaced rather than written
+/// through (`fs::copy` would follow it and clobber the link's target).
+fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).context("failed to create temp file")?;
+    tmp.write_all(data)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)?;
+    Ok(())
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -226,13 +288,123 @@ fn friendly_open_error(e: DatabaseOpenError) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    /// A vault saved with cheap key derivation (password "pw"), opened.
+    fn cheap_vault(path: &Path) -> Vault {
+        let mut db = Database::new();
+        if let KdfConfig::Argon2 {
+            iterations,
+            memory,
+            parallelism,
+            ..
+        } = &mut db.config.kdf_config
+        {
+            (*iterations, *memory, *parallelism) = (1, 64 * 1024, 1);
+        }
+        db.root_mut()
+            .add_entry()
+            .edit(|e| e.set_protected(fields::PASSWORD, "secret"));
+        let mut file = fs::File::create(path).unwrap();
+        db.save(&mut file, DatabaseKey::new().with_password("pw"))
+            .unwrap();
+        Vault::open(path, "pw", None).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saves_through_a_symlinked_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sync")).unwrap();
+        let real = dir.path().join("sync/v.kdbx");
+        drop(cheap_vault(&real));
+        let link = dir.path().join("v.kdbx");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut vault = Vault::open(&link, "pw", None).unwrap();
+        vault.db.root_mut().add_entry();
+        vault.save().unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(Vault::open(&real, "pw", None).unwrap().db.num_entries(), 2);
+        assert!(dir.path().join("sync/v.kdbx.bak").is_file());
+        assert!(!dir.path().join("v.kdbx.bak").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_open_fifos_and_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.kdbx");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            // Would block forever in fs::read without the check.
+            let err = Vault::open(&fifo, "pw", None).err().unwrap();
+            assert!(format!("{err:#}").contains("not a regular file"));
+        }
+        let err = Vault::open(Path::new("/dev/zero"), "pw", None)
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("not a regular file"));
+    }
+
+    #[test]
+    fn asks_before_overwriting_changes_made_by_another_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.kdbx");
+        let mut ours = cheap_vault(&path);
+        let mut theirs = Vault::open(&path, "pw", None).unwrap();
+        theirs.db.root_mut().add_entry();
+        theirs.save().unwrap();
+
+        ours.db.root_mut().add_entry();
+        let err = ours.save().unwrap_err();
+        assert!(err.is::<ChangedOnDisk>(), "{err:#}");
+        let theirs_on_disk = fs::read(&path).unwrap();
+
+        ours.save_overwriting().unwrap();
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), theirs_on_disk);
+        // Our own write is now the known state: plain saves work again.
+        ours.save().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_replaces_a_symlink_instead_of_writing_through_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.kdbx");
+        let mut vault = cheap_vault(&path);
+        let before = fs::read(&path).unwrap();
+
+        // Someone who can write to the folder plants v.kdbx.bak -> victim.
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"precious").unwrap();
+        let bak = dir.path().join("v.kdbx.bak");
+        std::os::unix::fs::symlink(&victim, &bak).unwrap();
+
+        vault.save().unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"precious");
+        let meta = fs::symlink_metadata(&bak).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&bak).unwrap(), before);
+    }
+
     #[test]
     fn create_writes_a_reopenable_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Fresh.kdbx");
         let vault = Vault::create(&path, "pw", None).unwrap();
         assert_eq!(vault.db.root().name, "Fresh");
-        assert!(Vault::create(&path, "pw", None).is_err(), "must not overwrite");
+        assert!(
+            Vault::create(&path, "pw", None).is_err(),
+            "must not overwrite"
+        );
         assert!(!dir.path().join("Fresh.kdbx.bak").exists());
 
         let reopened = Vault::open(&path, "pw", None).unwrap();
