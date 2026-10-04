@@ -428,6 +428,9 @@ pub struct App {
     pub dirty: bool,
     /// The user agreed to save this database in another format.
     convert_ack: bool,
+    /// A save waiting for the "Saving…" frame to be drawn: (then quit,
+    /// overwrite changes another program made).
+    pending_save: Option<(bool, bool)>,
 
     pub pane: Pane,
     pub expanded: HashSet<GroupId>,
@@ -491,6 +494,7 @@ impl App {
             should_quit: false,
             dirty: false,
             convert_ack: false,
+            pending_save: None,
             pane: Pane::Groups,
             expanded: HashSet::new(),
             sel_group: None,
@@ -544,9 +548,9 @@ impl App {
     }
 
     /// Run the slow work the last input scheduled (starting an unlock,
-    /// creating a database) as soon as the frame announcing it is drawn: the
-    /// main loop calls this right after each draw. Returns whether
-    /// anything changed, so the result can be drawn.
+    /// creating a database, saving) as soon as the frame announcing it is
+    /// drawn: the main loop calls this right after each draw. Returns
+    /// whether anything changed, so the result can be drawn.
     pub fn run_pending(&mut self) -> bool {
         let unlocking =
             matches!(&self.screen, Screen::Unlock(st) if st.working && st.job.is_none());
@@ -557,7 +561,19 @@ impl App {
         if creating {
             self.try_create();
         }
-        unlocking || creating
+        let save = self.pending_save.take();
+        if let Some((then_quit, overwrite)) = save {
+            self.do_save(then_quit, overwrite);
+        }
+        unlocking || creating || save.is_some()
+    }
+
+    /// Run a save that was scheduled but hasn't started: a termination
+    /// signal can end the main loop between Ctrl-s and the next frame.
+    pub fn finish_pending_save(&mut self) {
+        if let Some((then_quit, overwrite)) = self.pending_save.take() {
+            self.do_save(then_quit, overwrite);
+        }
     }
 
     /// An unlock is running in the background.
@@ -1886,7 +1902,15 @@ impl App {
             }));
             return;
         }
-        self.do_save(then_quit, false);
+        self.schedule_save(then_quit, false);
+    }
+
+    /// Save once the frame saying so is drawn (see run_pending): a save
+    /// derives the key twice (writing, then verifying the result), which
+    /// can take seconds with a slow key derivation setting.
+    fn schedule_save(&mut self, then_quit: bool, overwrite: bool) {
+        self.pending_save = Some((then_quit, overwrite));
+        self.set_status("Saving…");
     }
 
     fn do_save(&mut self, then_quit: bool, overwrite: bool) {
@@ -2022,9 +2046,9 @@ impl App {
             PendingAction::DiscardForm => self.screen = Screen::Browser,
             PendingAction::ConvertFormat { then_quit } => {
                 self.convert_ack = true;
-                self.do_save(then_quit, false);
+                self.schedule_save(then_quit, false);
             }
-            PendingAction::OverwriteExternal { then_quit } => self.do_save(then_quit, true),
+            PendingAction::OverwriteExternal { then_quit } => self.schedule_save(then_quit, true),
             PendingAction::QuitDirty => {}
         }
     }
@@ -2482,12 +2506,33 @@ mod tests {
     }
 
     #[test]
+    fn saving_shows_saving_first() {
+        let (_dir, mut app) = lockable();
+        app.dirty = true;
+        let path = app.vault.as_ref().unwrap().path.clone();
+        let before = std::fs::read(&path).unwrap();
+
+        // Ctrl-s only schedules the save, so "Saving…" can be drawn before
+        // the (possibly slow) key derivation blocks the UI...
+        app.on_key(ctrl('s'));
+        assert!(draw_at(&app, 80, 24).contains("Saving…"));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "saved too early");
+
+        // ...and the main loop runs it right after that frame.
+        assert!(app.run_pending());
+        assert_ne!(std::fs::read(&path).unwrap(), before);
+        assert!(!app.dirty);
+        assert!(draw_at(&app, 80, 24).contains("saved test.kdbx"));
+    }
+
+    #[test]
     fn asks_before_overwriting_external_changes() {
         let (_dir, mut app) = lockable();
         let path = app.vault.as_ref().unwrap().path.clone();
         std::fs::write(&path, b"written by another program").unwrap();
 
         app.on_key(ctrl('s'));
+        app.run_pending();
         assert!(matches!(
             app.overlay,
             Some(Overlay::Confirm(ConfirmState {
@@ -2496,6 +2541,7 @@ mod tests {
             }))
         ));
         app.on_key(key(KeyCode::Char('y')));
+        app.run_pending();
         assert!(app.overlay.is_none());
         assert!(matches!(&app.status, Some((msg, StatusKind::Info, _)) if msg.contains("saved")));
         let bak = path.with_file_name("test.kdbx.bak");
@@ -2631,6 +2677,7 @@ mod tests {
 
         // And they survive a save.
         app.on_key(ctrl('s'));
+        app.run_pending();
         let path = app.vault.as_ref().unwrap().path.clone();
         app.vault = Some(Vault::open(&path, "pw", None).unwrap());
         assert_eq!(deleted(&app), [true; 3]);

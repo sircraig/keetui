@@ -102,6 +102,7 @@ fn main() -> Result<()> {
         execute!(stdout(), EnableMouseCapture)?;
     }
     let res = run(&mut terminal, &mut app, &quit);
+    app.finish_pending_save();
     clipboard.clear_now();
     release_terminal(mouse);
     // Not `restore()`: after SIGHUP the terminal is gone, and its error
