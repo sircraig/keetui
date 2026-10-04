@@ -451,6 +451,9 @@ pub struct App {
     pub group_offset: Cell<usize>,
     pub entry_offset: Cell<usize>,
     pub page_rows: Cell<usize>,
+    /// The last frame was too small to show the UI; input is ignored until
+    /// it fits again, so keys can't act on forms that aren't drawn.
+    pub too_small: Cell<bool>,
 }
 
 impl App {
@@ -501,6 +504,7 @@ impl App {
             group_offset: Cell::new(0),
             entry_offset: Cell::new(0),
             page_rows: Cell::new(10),
+            too_small: Cell::new(false),
         }
     }
 
@@ -532,6 +536,15 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.last_input = Instant::now();
+        if self.too_small.get() {
+            // Only quitting, and only when nothing would be lost.
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if ctrl_c && !self.has_unsaved_work() {
+                self.should_quit = true;
+            }
+            return;
+        }
         if key.code == KeyCode::Char('l')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && self.is_unlocked()
@@ -559,7 +572,7 @@ impl App {
     /// as commands.) Only the notes field keeps line breaks.
     pub fn on_paste(&mut self, text: &str) {
         self.last_input = Instant::now();
-        if self.overlay.is_some() {
+        if self.overlay.is_some() || self.too_small.get() {
             return;
         }
         // A paste may well be a password: build what gets inserted in a
@@ -616,6 +629,9 @@ impl App {
         self.mouse = Some(pos);
         if ev.kind != MouseEventKind::Moved {
             self.last_input = Instant::now();
+        }
+        if self.too_small.get() {
+            return;
         }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -2832,6 +2848,51 @@ mod tests {
                 terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
             }
         }
+    }
+
+    fn draw_at(app: &App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        screen_text(&terminal)
+    }
+
+    #[test]
+    fn a_too_small_terminal_shows_why_and_ignores_keys() {
+        let (_dir, path) = vault_file(|_| {});
+        let mut app = App::new(Some(path), None, None);
+        // 80x12 is too short for the unlock form: it isn't drawn...
+        let text = draw_at(&app, 80, 12);
+        assert!(!text.contains("Password"));
+        // ...so typing must not go into a password field nobody can see.
+        app.on_key(key(KeyCode::Char('x')));
+        let Screen::Unlock(st) = &app.screen else {
+            panic!("expected the unlock screen");
+        };
+        assert!(st.password.text.is_empty(), "typing reached a hidden field");
+        assert!(text.contains("too small"), "the screen should say why");
+
+        // Big enough again: back to normal.
+        assert!(draw_at(&app, 80, 24).contains("Password"));
+        app.on_key(key(KeyCode::Char('x')));
+        let Screen::Unlock(st) = &app.screen else {
+            panic!("expected the unlock screen");
+        };
+        assert_eq!(st.password.text.as_str(), "x");
+    }
+
+    #[test]
+    fn a_hidden_confirmation_cannot_delete() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        let entries = |app: &App| app.vault.as_ref().unwrap().db.num_entries();
+        let before = entries(&app);
+        // In 5 rows the confirm dialog has no room for its question.
+        draw_at(&app, 80, 5);
+        app.on_key(key(KeyCode::Char('d')));
+        draw_at(&app, 80, 5);
+        app.on_key(key(KeyCode::Char('y')));
+        assert_eq!(entries(&app), before, "deleted behind an empty dialog");
     }
 
     #[test]

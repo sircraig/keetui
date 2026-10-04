@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, Hit, Screen};
 
@@ -19,8 +19,24 @@ pub const OK: Color = Color::Green;
 pub const WARN: Color = Color::Yellow;
 pub const ERR: Color = Color::Red;
 
+/// Smallest terminal that fits every screen, form and dialog.
+const MIN_WIDTH: u16 = 40;
+const MIN_HEIGHT: u16 = 15;
+
 pub fn draw(frame: &mut Frame, app: &App) {
     app.hits.borrow_mut().clear();
+    let area = frame.area();
+    let too_small = area.width < MIN_WIDTH || area.height < MIN_HEIGHT;
+    app.too_small.set(too_small);
+    if too_small {
+        let text = format!(
+            "Terminal too small ({}x{}): keetui needs at least {MIN_WIDTH}x{MIN_HEIGHT}. \
+             Ctrl-c quits if nothing is unsaved.",
+            area.width, area.height
+        );
+        frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
+        return;
+    }
     match &app.screen {
         Screen::Picker(st) => picker::draw(frame, app, st),
         Screen::Unlock(st) => unlock::draw(frame, app, st),
