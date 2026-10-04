@@ -104,8 +104,10 @@ Entry edits record the previous version in KeePass history, like KeePassXC.
 
 ## Clipboard
 
-Copies go through `wl-copy` (Wayland required) and auto-clear after 15
-seconds, or as soon as keetui exits — on quit, on a crash, or when the
+Copies go through `wl-copy` (Wayland required) and are marked sensitive
+(`--sensitive`, wl-clipboard 2.3+), so clipboard history managers that honor
+the hint don't record them. They auto-clear after 15 seconds, or as soon as
+keetui exits — on quit, on a crash, or when the
 terminal is closed — since `wl-copy` would otherwise keep serving the secret.
 Caveat: if you copy something else in another application during those 15
 seconds, the auto-clear will clear that too.
