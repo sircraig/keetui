@@ -348,7 +348,8 @@ pub enum PendingAction {
     DeleteEntry(EntryId),
     DeleteGroup(GroupId),
     DiscardForm,
-    ConvertKdbx3 {
+    /// Save a database in a format keepass-rs can't write as KDBX 4.1.
+    ConvertFormat {
         then_quit: bool,
     },
     /// Save over changes another program made to the file.
@@ -417,7 +418,8 @@ pub struct App {
     keyfile_arg: String,
     pub should_quit: bool,
     pub dirty: bool,
-    kdbx3_ack: bool,
+    /// The user agreed to save this database in another format.
+    convert_ack: bool,
 
     pub pane: Pane,
     pub expanded: HashSet<GroupId>,
@@ -477,7 +479,7 @@ impl App {
             keyfile_arg: keyfile_text,
             should_quit: false,
             dirty: false,
-            kdbx3_ack: false,
+            convert_ack: false,
             pane: Pane::Groups,
             expanded: HashSet::new(),
             sel_group: None,
@@ -1773,11 +1775,15 @@ impl App {
 
     fn save_flow(&mut self, then_quit: bool) {
         let Some(v) = &self.vault else { return };
-        if v.needs_kdbx4_upgrade() && !self.kdbx3_ack {
+        if let Some(format) = v.format_needing_conversion()
+            && !self.convert_ack
+        {
             self.overlay = Some(Overlay::Confirm(ConfirmState {
-                prompt: "This database is KDBX3; keetui saves as KDBX4 (KeePassXC-compatible). Continue?"
-                    .into(),
-                pending: PendingAction::ConvertKdbx3 { then_quit },
+                prompt: format!(
+                    "This database is {format}, which keetui can't write. Save it as \
+                     KDBX 4.1 (needs KeePassXC 2.7+ or KeePass 2.48+)?"
+                ),
+                pending: PendingAction::ConvertFormat { then_quit },
             }));
             return;
         }
@@ -1915,8 +1921,8 @@ impl App {
             PendingAction::DeleteEntry(id) => self.delete_entry(id),
             PendingAction::DeleteGroup(id) => self.delete_group(id),
             PendingAction::DiscardForm => self.screen = Screen::Browser,
-            PendingAction::ConvertKdbx3 { then_quit } => {
-                self.kdbx3_ack = true;
+            PendingAction::ConvertFormat { then_quit } => {
+                self.convert_ack = true;
                 self.do_save(then_quit, false);
             }
             PendingAction::OverwriteExternal { then_quit } => self.do_save(then_quit, true),

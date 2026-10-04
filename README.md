@@ -104,9 +104,12 @@ file is backed up to `<name>.kdbx.bak`, and the new file replaces the original
 via rename (each written to a fresh file first, so a symlink in the way is
 replaced, never written through). A vault opened through a symlink is saved to
 the link's target. If another program changed the file since keetui opened or
-last saved it, keetui asks before overwriting those changes. A database opened
-from a KDBX3 file is written back as KDBX4 (KeePassXC-compatible) with the
-same Argon2d settings as new databases, after a one-time confirmation.
+last saved it, keetui asks before overwriting those changes.
+
+keetui can only write KDBX 4.1, which KeePassXC 2.7+ and KeePass 2.48+ open.
+A database in another format is converted when you first save it, after a
+confirmation: a KDBX 4.0 file keeps its own encryption settings, while KDBX 3.1
+and KeePass 1.x (.kdb) files get the same Argon2d settings as new databases.
 
 Entry edits record the previous version in KeePass history, like KeePassXC.
 

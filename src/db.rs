@@ -118,9 +118,18 @@ impl Vault {
         Ok(build_key(password, keyfile)? == self.key)
     }
 
-    /// The database was opened from a pre-KDBX4 file and will be converted on save.
-    pub fn needs_kdbx4_upgrade(&self) -> bool {
-        !matches!(self.db.config.version, DatabaseVersion::KDB4(_))
+    /// The database's format, if keepass-rs can't write it: it only writes
+    /// KDBX 4.1, so anything else is converted when saved.
+    pub fn format_needing_conversion(&self) -> Option<&'static str> {
+        match self.db.config.version {
+            DatabaseVersion::KDB4(1) => None,
+            DatabaseVersion::KDB4(0) => Some("KDBX 4.0"),
+            DatabaseVersion::KDB4(_) => Some("a newer KDBX 4"),
+            DatabaseVersion::KDB3(0) => Some("KDBX 3.0"),
+            DatabaseVersion::KDB3(_) => Some("KDBX 3.1"),
+            DatabaseVersion::KDB2(_) => Some("a KeePass 2 pre-release format"),
+            DatabaseVersion::KDB(_) => Some("KeePass 1.x (.kdb)"),
+        }
     }
 
     /// Serialize, verify, back up the old file, then atomically replace it.
@@ -137,9 +146,13 @@ impl Vault {
 
     fn write(&mut self, overwrite: bool) -> Result<()> {
         let _saving = SaveInProgress::start();
-        if self.needs_kdbx4_upgrade() {
-            // The crate can only write KDBX4; adopt keetui's config for new files.
-            self.db.config = new_db_config();
+        // keepass-rs only writes KDBX 4.1. A KDBX 4 file keeps its own
+        // encryption settings (4.1 supports all of them); older formats get
+        // keetui's settings for new files.
+        match self.db.config.version {
+            DatabaseVersion::KDB4(1) => {}
+            DatabaseVersion::KDB4(_) => self.db.config.version = DatabaseVersion::KDB4(1),
+            _ => self.db.config = new_db_config(),
         }
 
         let mut buf = Vec::new();
@@ -419,6 +432,38 @@ mod tests {
         assert!(meta.file_type().is_file());
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read(&bak).unwrap(), before);
+    }
+
+    #[test]
+    fn saves_kdbx_4_0_as_4_1_keeping_its_settings() {
+        // KeePassXC writes KDBX 4.0 when no 4.1 feature is in use; such a
+        // file opens as KDB4(0), which keepass-rs can't write.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.kdbx");
+        let mut vault = cheap_vault(&path);
+        vault.db.config.version = DatabaseVersion::KDB4(0);
+        let settings = vault.db.config.kdf_config.clone();
+        assert_eq!(vault.format_needing_conversion(), Some("KDBX 4.0"));
+
+        vault.save().unwrap();
+        let reopened = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(reopened.db.config.version, DatabaseVersion::KDB4(1));
+        assert_eq!(reopened.db.config.kdf_config, settings, "kept its own KDF");
+        assert_eq!(reopened.format_needing_conversion(), None);
+    }
+
+    #[test]
+    fn names_the_format_being_converted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = cheap_vault(&dir.path().join("v.kdbx"));
+        for (version, name) in [
+            (DatabaseVersion::KDB(1), "KeePass 1.x (.kdb)"),
+            (DatabaseVersion::KDB3(1), "KDBX 3.1"),
+            (DatabaseVersion::KDB4(0), "KDBX 4.0"),
+        ] {
+            vault.db.config.version = version;
+            assert_eq!(vault.format_needing_conversion(), Some(name));
+        }
     }
 
     #[test]
