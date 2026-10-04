@@ -320,13 +320,21 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         path
     };
+    // e and d act on the focused pane (in the groups pane they rename and
+    // delete the group), so only show them as the entry's keys while the
+    // entries pane has focus. Clicking the buttons acts on the entry anyway.
+    let (edit_key, delete_key) = if app.pane == Pane::Entries {
+        ("e", "d")
+    } else {
+        ("", "")
+    };
     let bx = buttons_right(
         frame,
         app,
         row(y),
         vec![
-            btn("e", "edit", Hit::EntryAct(Action::Edit)),
-            btn("d", "delete", Hit::EntryAct(Action::Delete)),
+            btn(edit_key, "edit", Hit::EntryAct(Action::Edit)),
+            btn(delete_key, "delete", Hit::EntryAct(Action::Delete)),
         ],
     );
     let path_w = bx.saturating_sub(inner.x + 1) as usize;

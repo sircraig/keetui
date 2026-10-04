@@ -2641,6 +2641,50 @@ mod tests {
     }
 
     #[test]
+    fn detail_pane_hints_only_keys_that_act_on_the_entry() {
+        let (_dir, mut app) = unlocked(|db| {
+            let mut root = db.root_mut();
+            let mut work = root.add_group();
+            work.name = "Work".into();
+            work.add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "GitHub"));
+        });
+        // Browsing groups: Work selected, its entry GitHub in the detail pane.
+        let work = app
+            .vault
+            .as_ref()
+            .unwrap()
+            .db
+            .root()
+            .group_by_name("Work")
+            .unwrap()
+            .id();
+        app.select_group(work);
+        assert!(app.pane == Pane::Groups);
+        let draw = |app: &App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+            screen_text(&terminal)
+        };
+        let text = draw(&app);
+        assert!(text.contains("GitHub"));
+        // Here e and d act on the group, so the entry's buttons mustn't say so.
+        assert!(
+            !text.contains("[d delete]") && !text.contains("[e edit]"),
+            "entry buttons advertise keys that act on the group"
+        );
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(matches!(&app.overlay, Some(Overlay::Confirm(cs)) if cs.prompt.contains("group")));
+        app.on_key(key(KeyCode::Char('n')));
+
+        // In the entries pane the keys do act on the entry.
+        app.on_key(key(KeyCode::Tab));
+        let text = draw(&app);
+        assert!(text.contains("[d delete]") && text.contains("[e edit]"));
+    }
+
+    #[test]
     fn unusable_totp_settings_do_not_crash() {
         let (_dir, mut app) = unlocked(|db| {
             db.root_mut().add_entry().edit(|e| {
