@@ -13,6 +13,7 @@ KeePassXC.
 keetui                                       # browse for a database
 keetui /path/to/vault.kdbx
 keetui /path/to/vault.kdbx --keyfile /path/to/key
+keetui /path/to/vault.kdbx --lock-after 10   # lock after 10 idle minutes (0 = never)
 ```
 
 ### Opening a database
@@ -54,11 +55,22 @@ that shows what you can do right now (every item in it is clickable).
 | `d` | delete (to recycle bin when the database has one) |
 | `Ctrl-g` | password generator |
 | `Ctrl-s` | save |
+| `Ctrl-l` | lock |
 | `q` | quit (prompts when there are unsaved changes) |
 | `?` | help |
 
 Search covers all groups (recycle bin excluded); space-separated words must all
 match. Going back to the groups pane ends the search.
+
+### Locking
+
+keetui locks itself after 5 minutes without a key press, click or scroll
+(`--lock-after MINUTES`; `0` turns this off), and `Ctrl-l` locks it right
+away. Locking forgets the decrypted database: unlocking reads it from disk
+again and returns to where you were. If there are unsaved changes, they are
+kept in memory behind the master password instead, so nothing is lost, and
+quitting from the lock screen offers to save them. A revealed password hides
+itself again after 30 seconds.
 
 ### Mouse
 

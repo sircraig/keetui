@@ -163,7 +163,7 @@ fn draw_generator(frame: &mut Frame, app: &App, st: &GenState) {
 fn draw_help(frame: &mut Frame, app: &App) {
     // Any click closes help.
     hit(app, frame.area(), Hit::Dismiss);
-    let inner = modal(frame, 76, 31, " Help ", ACCENT);
+    let inner = modal(frame, 76, 33, " Help ", ACCENT);
 
     let sections: &[(&str, &[(&str, &str)])] = &[
         (
@@ -193,6 +193,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
                 ("e (groups)", "rename group"),
                 ("Ctrl-g", "password generator"),
                 ("Ctrl-s", "save · q quit"),
+                ("Ctrl-l", "lock"),
             ],
         ),
         (

@@ -8,11 +8,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use crate::app::{
-    App, C_CONFIRM, C_KEYFILE, C_PASS, CREATE_FIELD_LABELS, CreateState, Hit, TextField,
-    UnlockState,
+    App, C_CONFIRM, C_KEYFILE, C_PASS, CREATE_FIELD_LABELS, CreateState, Hit, StatusKind,
+    TextField, UnlockState,
 };
 
-use super::{ACCENT, DIM, ERR, OK, btn, buttons, centered, hit, mask, scroll_window, truncate};
+use super::{
+    ACCENT, DIM, ERR, OK, WARN, btn, buttons, centered, hit, mask, scroll_window, truncate,
+};
 
 const LABEL_W: u16 = 11;
 
@@ -99,25 +101,43 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
         Some("optional"),
     );
 
-    frame.render_widget(message(st.working, "Unlocking…", st.error.as_ref()), row(6));
-
-    buttons(
-        frame,
-        app,
-        inner.x,
-        inner.bottom() - 1,
-        inner.right(),
-        vec![
-            btn("⏎", "unlock", key(KeyCode::Enter, KeyModifiers::NONE)),
-            btn(
-                "^o",
-                "open other",
-                key(KeyCode::Char('o'), KeyModifiers::CONTROL),
-            ),
-            btn("^n", "new", key(KeyCode::Char('n'), KeyModifiers::CONTROL)),
-            btn("esc", "quit", key(KeyCode::Esc, KeyModifiers::NONE)),
-        ],
+    // While locked, a failed save-and-quit reports through the status.
+    let status_error = match &app.status {
+        Some((msg, StatusKind::Error, _)) => Some(msg),
+        _ => None,
+    };
+    let error = st.error.as_ref().or(status_error);
+    let note = match &st.locked {
+        Some(reason) if !st.working && error.is_none() => Paragraph::new(
+            Span::raw(format!("{reason}. Enter the master password to continue.")).fg(WARN),
+        )
+        .wrap(Wrap { trim: true }),
+        _ => message(st.working, "Unlocking…", error),
+    };
+    frame.render_widget(
+        note,
+        Rect {
+            height: 2,
+            ..row(6)
+        },
     );
+
+    let mut btns = vec![btn("⏎", "unlock", key(KeyCode::Enter, KeyModifiers::NONE))];
+    // Switching databases would drop the unsaved work held by the lock.
+    if !app.locked_with_unsaved_work() {
+        btns.push(btn(
+            "^o",
+            "open other",
+            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        ));
+        btns.push(btn(
+            "^n",
+            "new",
+            key(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        ));
+    }
+    btns.push(btn("esc", "quit", key(KeyCode::Esc, KeyModifiers::NONE)));
+    buttons(frame, app, inner.x, inner.bottom() - 1, inner.right(), btns);
 
     if !st.working {
         frame.set_cursor_position(if st.focus_keyfile {

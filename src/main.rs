@@ -43,6 +43,10 @@ struct Args {
     /// Disable mouse support (keeps the terminal's own text selection)
     #[arg(long)]
     no_mouse: bool,
+
+    /// Lock after this many minutes without input (0 = never)
+    #[arg(long, value_name = "MINUTES", default_value_t = 5)]
+    lock_after: u64,
 }
 
 fn main() -> Result<()> {
@@ -62,7 +66,9 @@ fn main() -> Result<()> {
     }
 
     let mouse = !args.no_mouse;
-    let mut app = app::App::new(args.database, args.keyfile);
+    let lock_after =
+        (args.lock_after > 0).then(|| Duration::from_secs(args.lock_after.saturating_mul(60)));
+    let mut app = app::App::new(args.database, args.keyfile, lock_after);
     let clipboard = app.clipboard.clone();
     let quit = Arc::new(AtomicBool::new(false));
     watch_signals(clipboard.clone(), Arc::clone(&quit), mouse)?;

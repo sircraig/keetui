@@ -59,6 +59,12 @@ impl Vault {
         Ok(vault)
     }
 
+    /// Does this password and key file make the key the vault was opened
+    /// with? Lets a locked session resume without re-reading the file.
+    pub fn key_matches(&self, password: &str, keyfile: Option<&Path>) -> Result<bool> {
+        Ok(build_key(password, keyfile)? == self.key)
+    }
+
     /// The database was opened from a pre-KDBX4 file and will be converted on save.
     pub fn needs_kdbx4_upgrade(&self) -> bool {
         !matches!(self.db.config.version, DatabaseVersion::KDB4(_))

@@ -23,6 +23,8 @@ use crate::{open, totp};
 const STATUS_TTL: Duration = Duration::from_secs(5);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SCROLL_STEP: isize = 3;
+/// A revealed password hides itself again after this long.
+const REVEAL_TTL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Text editing primitive shared by all forms. The buffer is Zeroizing so
@@ -115,6 +117,9 @@ pub struct UnlockState {
     /// Set when Enter was pressed; the (slow) unlock runs on the next tick so
     /// the "unlocking…" frame gets drawn first.
     pub working: bool,
+    /// Set when the session locked itself, saying why. Unlocking then picks
+    /// up where the session left off.
+    pub locked: Option<String>,
 }
 
 impl UnlockState {
@@ -125,6 +130,7 @@ impl UnlockState {
             focus_keyfile: false,
             error: None,
             working: false,
+            locked: None,
         }
     }
 }
@@ -364,8 +370,18 @@ pub struct App {
     pub search: Option<String>,
     pub search_input: bool,
     pub reveal: bool,
+    /// When the password was last revealed, for hiding it again.
+    revealed_at: Instant,
     pub status: Option<(String, StatusKind, Instant)>,
     pub clipboard: Clipboard,
+
+    /// Lock after this long without input; None never locks.
+    lock_after: Option<Duration>,
+    /// Last key press, click, scroll or paste.
+    last_input: Instant,
+    /// Locked with unsaved work: the screen and overlay to return to once
+    /// the master password is re-entered. The vault stays loaded meanwhile.
+    resume: Option<(Screen, Option<Overlay>)>,
 
     // Mouse support. `hits` and the scroll offsets are written by the UI
     // during drawing, hence the interior mutability.
@@ -379,7 +395,11 @@ pub struct App {
 
 impl App {
     /// `db_path` None starts in the file picker.
-    pub fn new(db_path: Option<PathBuf>, keyfile: Option<PathBuf>) -> Self {
+    pub fn new(
+        db_path: Option<PathBuf>,
+        keyfile: Option<PathBuf>,
+        lock_after: Option<Duration>,
+    ) -> Self {
         let keyfile_text = keyfile
             .as_deref()
             .map(|p| p.display().to_string())
@@ -409,8 +429,12 @@ impl App {
             search: None,
             search_input: false,
             reveal: false,
+            revealed_at: Instant::now(),
             status: None,
             clipboard: Clipboard::new(),
+            lock_after,
+            last_input: Instant::now(),
+            resume: None,
             hits: RefCell::new(Vec::new()),
             mouse: None,
             last_click: None,
@@ -434,11 +458,27 @@ impl App {
         {
             self.status = None;
         }
+        if self.reveal && self.revealed_at.elapsed() >= REVEAL_TTL {
+            self.reveal = false;
+        }
+        if let Some(after) = self.lock_after
+            && self.last_input.elapsed() >= after
+        {
+            self.lock(&format!("Locked after {} of inactivity", minutes(after)));
+        }
         self.try_unlock();
         self.try_create();
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.last_input = Instant::now();
+        if key.code == KeyCode::Char('l')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.is_unlocked()
+        {
+            self.lock("Locked");
+            return;
+        }
         if self.overlay.is_some() {
             self.on_overlay_key(key);
             return;
@@ -458,6 +498,9 @@ impl App {
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         let pos = Position::new(ev.column, ev.row);
         self.mouse = Some(pos);
+        if ev.kind != MouseEventKind::Moved {
+            self.last_input = Instant::now();
+        }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let double = self
@@ -575,9 +618,13 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => self.should_quit = true,
-            KeyCode::Char('c') if ctrl => self.should_quit = true,
+            // Asks first when locked with unsaved work.
+            KeyCode::Esc => self.request_quit(),
+            KeyCode::Char('c') if ctrl => self.request_quit(),
             KeyCode::Char('k') if ctrl => st.focus_keyfile = !st.focus_keyfile,
+            KeyCode::Char('n' | 'o') if ctrl && self.resume.is_some() => {
+                st.error = Some("unlock first: this session has unsaved changes".into());
+            }
             KeyCode::Char('n') if ctrl => {
                 let path = suggest_new_path(&self.db_dir());
                 self.screen = Screen::Create(CreateState::new(&path, ""));
@@ -623,19 +670,96 @@ impl App {
         let password = st.password.text.clone();
         let keyfile_text = st.keyfile.text.trim().to_string();
         let keyfile = (!keyfile_text.is_empty()).then(|| PathBuf::from(&keyfile_text));
+        let resuming = st.locked.is_some();
+
+        // Locked with unsaved work: the vault is still loaded, so check the
+        // key against it rather than re-reading the file.
+        if self.resume.is_some()
+            && let Some(v) = &self.vault
+        {
+            match v.key_matches(&password, keyfile.as_deref()) {
+                Ok(true) => {
+                    if let Some((screen, overlay)) = self.resume.take() {
+                        self.screen = screen;
+                        self.overlay = overlay;
+                    }
+                }
+                Ok(false) => self.unlock_failed("wrong password or key file".into()),
+                Err(e) => self.unlock_failed(format!("{e:#}")),
+            }
+            return;
+        }
 
         match Vault::open(&self.db_path, &password, keyfile.as_deref()) {
             Ok(vault) => {
                 self.vault = Some(vault);
                 self.screen = Screen::Browser;
-                self.init_after_unlock();
-            }
-            Err(e) => {
-                if let Screen::Unlock(st) = &mut self.screen {
-                    st.error = Some(format!("{e:#}"));
-                    st.password.set_text("");
+                self.keyfile_arg = keyfile_text;
+                if resuming {
+                    // Selection and expanded groups survived the lock.
+                    self.rebuild();
+                } else {
+                    self.init_after_unlock();
                 }
             }
+            Err(e) => self.unlock_failed(format!("{e:#}")),
+        }
+    }
+
+    fn unlock_failed(&mut self, msg: String) {
+        if let Screen::Unlock(st) = &mut self.screen {
+            st.error = Some(msg);
+            st.password.set_text("");
+        }
+    }
+
+    /// Is a database open and on screen (as opposed to locked)?
+    fn is_unlocked(&self) -> bool {
+        self.vault.is_some()
+            && matches!(
+                self.screen,
+                Screen::Browser | Screen::EntryEdit(_) | Screen::GroupEdit(_)
+            )
+    }
+
+    /// Locked, with unsaved work waiting behind the master password.
+    pub fn locked_with_unsaved_work(&self) -> bool {
+        self.resume.is_some()
+    }
+
+    /// Changes not yet on disk, including a modified edit form (on screen,
+    /// or set aside by a lock).
+    fn has_unsaved_work(&self) -> bool {
+        let form_modified = |screen: &Screen| match screen {
+            Screen::EntryEdit(f) => f.modified,
+            Screen::GroupEdit(f) => f.modified,
+            _ => false,
+        };
+        self.dirty
+            || form_modified(&self.screen)
+            || self.resume.as_ref().is_some_and(|(s, _)| form_modified(s))
+    }
+
+    /// Lock the session behind the master password. Without unsaved work
+    /// the decrypted database is dropped, zeroizing the key and protected
+    /// fields; with it, the database and the screen are set aside instead,
+    /// so nothing is lost. Selection and expanded groups (IDs only) stay.
+    fn lock(&mut self, reason: &str) {
+        if !self.is_unlocked() {
+            return;
+        }
+        let keep = self.has_unsaved_work();
+        let mut st = UnlockState::new(&self.keyfile_arg);
+        st.locked = Some(reason.to_string());
+        let screen = mem::replace(&mut self.screen, Screen::Unlock(st));
+        let overlay = self.overlay.take();
+        self.reveal = false;
+        self.search_input = false;
+        self.status = None;
+        if keep {
+            self.resume = Some((screen, overlay));
+        } else {
+            self.vault = None;
         }
     }
 
@@ -843,6 +967,7 @@ impl App {
             Action::ToggleReveal => {
                 if self.sel_entry.is_some() {
                     self.reveal = !self.reveal;
+                    self.revealed_at = Instant::now();
                 }
             }
             Action::NewEntry => self.open_new_entry(),
@@ -1524,7 +1649,7 @@ impl App {
     }
 
     fn request_quit(&mut self) {
-        if self.dirty {
+        if self.has_unsaved_work() {
             self.overlay = Some(Overlay::Confirm(ConfirmState {
                 prompt: "You have unsaved changes.".into(),
                 pending: PendingAction::QuitDirty,
@@ -1753,6 +1878,15 @@ fn notes_vertical(field: &mut TextField, up: bool) -> bool {
     true
 }
 
+/// "5 minutes" style rendering of a lock timeout.
+fn minutes(d: Duration) -> String {
+    match d.as_secs() {
+        60 => "1 minute".into(),
+        s if s % 60 == 0 => format!("{} minutes", s / 60),
+        s => format!("{s} seconds"),
+    }
+}
+
 fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
         return 0;
@@ -1794,7 +1928,7 @@ mod tests {
         db.save(&mut file, keepass::DatabaseKey::new().with_password("pw"))
             .unwrap();
 
-        let mut app = App::new(Some(path), None);
+        let mut app = App::new(Some(path), None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -1803,6 +1937,113 @@ mod tests {
         app.on_tick();
         assert!(matches!(app.screen, Screen::Browser), "unlock failed");
         (dir, app)
+    }
+
+    /// An unlocked app that locks after a minute idle, with two entries.
+    fn lockable() -> (tempfile::TempDir, App) {
+        let (dir, mut app) = unlocked(|db| {
+            for title in ["Alpha-entry", "Bravo-entry"] {
+                db.root_mut().add_entry().edit(|e| {
+                    e.set_unprotected(fields::TITLE, title);
+                    e.set_protected(fields::PASSWORD, "secret");
+                });
+            }
+        });
+        app.lock_after = Some(Duration::from_secs(60));
+        (dir, app)
+    }
+
+    fn go_idle(app: &mut App) {
+        app.last_input = Instant::now().checked_sub(Duration::from_secs(61)).unwrap();
+        app.on_tick();
+    }
+
+    fn enter_password(app: &mut App, password: &str) {
+        let Screen::Unlock(st) = &mut app.screen else {
+            panic!("expected the unlock screen");
+        };
+        st.password.set_text(password);
+        app.on_key(key(KeyCode::Enter));
+        app.on_tick();
+    }
+
+    fn screen_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        buffer.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn idle_session_locks_and_resumes_in_place() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('j')));
+        let selected = app.sel_entry;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        assert!(screen_text(&terminal).contains("Bravo-entry"));
+
+        go_idle(&mut app);
+        assert!(matches!(&app.screen, Screen::Unlock(st) if st.locked.is_some()));
+        assert!(
+            app.vault.is_none(),
+            "nothing unsaved, so the vault is dropped"
+        );
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains("inactivity") && !text.contains("Bravo-entry"));
+
+        enter_password(&mut app, "wrong");
+        assert!(app.vault.is_none());
+        enter_password(&mut app, "pw");
+        assert!(matches!(app.screen, Screen::Browser));
+        assert_eq!(app.sel_entry, selected);
+        assert!(app.pane == Pane::Entries);
+    }
+
+    #[test]
+    fn locking_keeps_unsaved_work_behind_the_password() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Char('A')));
+        for c in "Draft".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(ctrl('l'));
+        assert!(matches!(app.screen, Screen::Unlock(_)));
+        assert!(app.vault.is_some() && app.locked_with_unsaved_work());
+
+        // Switching databases from the lock screen would lose the draft.
+        app.on_key(ctrl('o'));
+        assert!(matches!(&app.screen, Screen::Unlock(st) if st.error.is_some()));
+
+        enter_password(&mut app, "wrong");
+        assert!(app.locked_with_unsaved_work());
+        enter_password(&mut app, "pw");
+        assert!(matches!(&app.screen, Screen::GroupEdit(f) if f.name.text.as_str() == "Draft"));
+        assert!(!app.locked_with_unsaved_work());
+    }
+
+    #[test]
+    fn quitting_while_locked_with_unsaved_work_asks_first() {
+        let (_dir, mut app) = lockable();
+        app.dirty = true;
+        go_idle(&mut app);
+        assert!(app.locked_with_unsaved_work());
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+        assert!(!app.should_quit);
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn revealed_password_hides_itself() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Char('r')));
+        assert!(app.reveal);
+        app.revealed_at = Instant::now().checked_sub(REVEAL_TTL).unwrap();
+        app.on_tick();
+        assert!(!app.reveal);
     }
 
     #[test]
