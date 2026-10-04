@@ -51,6 +51,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    harden_process();
     let args = Args::parse();
 
     // A missing database is fine: the app offers to create it.
@@ -98,6 +99,34 @@ fn main() -> Result<()> {
     // report would panic writing to it.
     let _ = ratatui::try_restore();
     res
+}
+
+/// Keep secrets out of crash dumps and away from other processes: while a
+/// vault is open, protected fields and the master password sit in memory as
+/// plain text.
+fn harden_process() {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::process::{
+            DumpableBehavior, Resource, Rlimit, getrlimit, set_dumpable_behavior, setrlimit,
+        };
+        // No core file. The kernel ignores RLIMIT_CORE when core_pattern
+        // pipes to a handler, but systemd-coredump honors a zero soft limit.
+        // Children inherit it with the hard limit intact, so they can raise
+        // it again.
+        let maximum = getrlimit(Resource::Core).maximum;
+        let _ = setrlimit(
+            Resource::Core,
+            Rlimit {
+                current: Some(0),
+                maximum,
+            },
+        );
+        // Not dumpable: other processes of the same user can't ptrace keetui
+        // or read its /proc/<pid>/mem, and a dump that happens anyway is
+        // readable by root only.
+        let _ = set_dumpable_behavior(DumpableBehavior::NotDumpable);
+    }
 }
 
 /// Undo the terminal modes keetui enables on top of ratatui's own setup.
@@ -168,4 +197,19 @@ fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use rustix::process::{DumpableBehavior, Resource, dumpable_behavior, getrlimit};
+
+    #[test]
+    fn hardening_disables_core_dumps() {
+        super::harden_process();
+        assert_eq!(getrlimit(Resource::Core).current, Some(0));
+        assert!(matches!(
+            dumpable_behavior(),
+            Ok(DumpableBehavior::NotDumpable)
+        ));
+    }
 }

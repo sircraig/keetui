@@ -122,7 +122,10 @@ seconds, the auto-clear will clear that too.
 Proportionate to a personal tool: the master password and form buffers are
 zeroized after use, protected fields stay encrypted in memory via the keepass
 crate, secrets are piped (never passed as arguments), and nothing is logged.
-No mlock/swap hardening — use full-disk encryption and encrypted swap.
+Core dumps are disabled and the process is marked non-dumpable, so a crash
+can't write decrypted secrets to disk and other processes of the same user
+can't read keetui's memory. No mlock/swap hardening — use full-disk
+encryption and encrypted swap.
 
 ## Development
 
