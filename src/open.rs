@@ -36,13 +36,23 @@ pub fn normalize_url(raw: &str) -> Result<String> {
                 return Ok(format!("https://{url}"));
             }
             check_scheme(scheme)?;
-            Ok(url.to_string())
+            Ok(drop_mailto_query(scheme, url))
         }
         Some((scheme, _)) if url[scheme.len()..].starts_with("://") => {
             check_scheme(scheme)?;
-            Ok(url.to_string())
+            Ok(drop_mailto_query(scheme, url))
         }
         _ => Ok(format!("https://{url}")),
+    }
+}
+
+/// Some mail clients honor `?attach=/path` in a mailto: link and attach
+/// that local file to the draft. A password entry only needs the address.
+fn drop_mailto_query(scheme: &str, url: &str) -> String {
+    if scheme.eq_ignore_ascii_case("mailto") {
+        url.split(['?', '#']).next().unwrap_or(url).to_string()
+    } else {
+        url.to_string()
     }
 }
 
@@ -84,6 +94,18 @@ mod tests {
             "https://example.com:8443/x"
         );
         assert_eq!(normalize_url("mailto:a@b.c").unwrap(), "mailto:a@b.c");
+        assert_eq!(
+            normalize_url("mailto:a@b.c?attach=/home/u/.ssh/id_ed25519").unwrap(),
+            "mailto:a@b.c"
+        );
+        assert_eq!(
+            normalize_url("MAILTO:a@b.c?subject=hi#x").unwrap(),
+            "MAILTO:a@b.c"
+        );
+        assert_eq!(
+            normalize_url("https://x.com/a?b=c#d").unwrap(),
+            "https://x.com/a?b=c#d"
+        );
         assert!(normalize_url("cmd://rm -rf ~").is_err());
         assert!(normalize_url("file:///etc/passwd").is_err());
         assert!(normalize_url("javascript:alert(1)").is_err());

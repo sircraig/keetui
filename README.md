@@ -93,7 +93,8 @@ pasted text never runs as commands. The OTP field accepts an `otpauth://` URL or
 read-only and kept intact when editing.
 
 URLs without a scheme open as `https://`. `cmd://`, `file://` and other
-non-web schemes are refused.
+non-web schemes are refused, and `mailto:` links open without their query
+part (some mail clients would attach local files named in it).
 
 ## Saving
 
