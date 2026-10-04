@@ -1,39 +1,13 @@
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Margin, Rect};
+use ratatui::crossterm::event::KeyCode;
+use ratatui::layout::Rect;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, ConfirmState, GenState, Hit, Overlay, PendingAction, Screen};
 
-use super::{ACCENT, DIM, ERR, WARN, btn, button, buttons, centered, hit};
-
-fn key(code: KeyCode) -> Hit {
-    Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
-}
-
-fn ch(c: char) -> Hit {
-    key(KeyCode::Char(c))
-}
-
-fn modal(
-    frame: &mut Frame,
-    w: u16,
-    h: u16,
-    title: &'static str,
-    color: ratatui::style::Color,
-) -> Rect {
-    let area = centered(w, h, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(color))
-        .title(Span::raw(title).fg(color).bold());
-    let inner = block.inner(area).inner(Margin::new(1, 1));
-    frame.render_widget(block, area);
-    inner
-}
+use super::{ACCENT, DIM, ERR, WARN, btn, button, buttons, ch, hit, key, modal};
 
 pub fn draw(frame: &mut Frame, app: &App, overlay: &Overlay) {
     match overlay {
@@ -52,7 +26,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
             | PendingAction::OverwriteExternal { .. }
     );
     let color = if destructive { ERR } else { WARN };
-    let inner = modal(frame, 62, 8, " Confirm ", color);
+    let inner = modal(frame, frame.area(), (62, 8), " Confirm ", color);
     if inner.height < 2 {
         return;
     }
@@ -92,7 +66,13 @@ fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
 }
 
 fn draw_generator(frame: &mut Frame, app: &App, st: &GenState) {
-    let inner = modal(frame, 60, 10, " Password generator ", ACCENT);
+    let inner = modal(
+        frame,
+        frame.area(),
+        (60, 10),
+        " Password generator ",
+        ACCENT,
+    );
     if inner.height < 5 {
         return;
     }
@@ -169,7 +149,7 @@ fn draw_generator(frame: &mut Frame, app: &App, st: &GenState) {
 fn draw_help(frame: &mut Frame, app: &App) {
     // Any click closes help.
     hit(app, frame.area(), Hit::Dismiss);
-    let inner = modal(frame, 76, 33, " Help ", ACCENT);
+    let inner = modal(frame, frame.area(), (76, 33), " Help ", ACCENT);
 
     let sections: &[(&str, &[(&str, &str)])] = &[
         (

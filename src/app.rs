@@ -272,10 +272,7 @@ fn expand_home(s: &str) -> PathBuf {
 
 fn resolve_db_path(s: &str) -> PathBuf {
     let mut path = expand_home(s.trim());
-    if path
-        .extension()
-        .is_none_or(|e| !e.eq_ignore_ascii_case("kdbx"))
-    {
+    if !picker::is_kdbx(&path) {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".kdbx");
         path.set_file_name(name);
@@ -431,6 +428,9 @@ pub struct App {
     pub dirty: bool,
     /// The user agreed to save this database in another format.
     convert_ack: bool,
+    /// A save waiting for the "Saving…" frame to be drawn: (then quit,
+    /// overwrite changes another program made).
+    pending_save: Option<(bool, bool)>,
 
     pub pane: Pane,
     pub expanded: HashSet<GroupId>,
@@ -494,6 +494,7 @@ impl App {
             should_quit: false,
             dirty: false,
             convert_ack: false,
+            pending_save: None,
             pane: Pane::Groups,
             expanded: HashSet::new(),
             sel_group: None,
@@ -541,8 +542,43 @@ impl App {
         {
             self.lock(&format!("Locked after {} of inactivity", minutes(after)));
         }
+        // Polls a running unlock. Creating a database waits for
+        // run_pending, so "Creating…" is always drawn first.
         self.try_unlock();
-        self.try_create();
+    }
+
+    /// Run the slow work the last input scheduled (starting an unlock,
+    /// creating a database, saving) as soon as the frame announcing it is
+    /// drawn: the main loop calls this right after each draw. Returns
+    /// whether anything changed, so the result can be drawn.
+    pub fn run_pending(&mut self) -> bool {
+        let unlocking =
+            matches!(&self.screen, Screen::Unlock(st) if st.working && st.job.is_none());
+        let creating = matches!(&self.screen, Screen::Create(st) if st.working);
+        if unlocking {
+            self.try_unlock();
+        }
+        if creating {
+            self.try_create();
+        }
+        let save = self.pending_save.take();
+        if let Some((then_quit, overwrite)) = save {
+            self.do_save(then_quit, overwrite);
+        }
+        unlocking || creating || save.is_some()
+    }
+
+    /// Run a save that was scheduled but hasn't started: a termination
+    /// signal can end the main loop between Ctrl-s and the next frame.
+    pub fn finish_pending_save(&mut self) {
+        if let Some((then_quit, overwrite)) = self.pending_save.take() {
+            self.do_save(then_quit, overwrite);
+        }
+    }
+
+    /// An unlock is running in the background.
+    pub fn busy(&self) -> bool {
+        matches!(&self.screen, Screen::Unlock(st) if st.job.is_some())
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -1185,7 +1221,8 @@ impl App {
         if let Some(q) = &mut self.search {
             f(q);
         }
-        self.rebuild();
+        // The group tree can't have changed; don't re-flatten it.
+        self.rebuild_entries();
     }
 
     fn cancel_search(&mut self) {
@@ -1865,7 +1902,15 @@ impl App {
             }));
             return;
         }
-        self.do_save(then_quit, false);
+        self.schedule_save(then_quit, false);
+    }
+
+    /// Save once the frame saying so is drawn (see run_pending): a save
+    /// derives the key twice (writing, then verifying the result), which
+    /// can take seconds with a slow key derivation setting.
+    fn schedule_save(&mut self, then_quit: bool, overwrite: bool) {
+        self.pending_save = Some((then_quit, overwrite));
+        self.set_status("Saving…");
     }
 
     fn do_save(&mut self, then_quit: bool, overwrite: bool) {
@@ -2001,9 +2046,9 @@ impl App {
             PendingAction::DiscardForm => self.screen = Screen::Browser,
             PendingAction::ConvertFormat { then_quit } => {
                 self.convert_ack = true;
-                self.do_save(then_quit, false);
+                self.schedule_save(then_quit, false);
             }
-            PendingAction::OverwriteExternal { then_quit } => self.do_save(then_quit, true),
+            PendingAction::OverwriteExternal { then_quit } => self.schedule_save(then_quit, true),
             PendingAction::QuitDirty => {}
         }
     }
@@ -2013,7 +2058,6 @@ impl App {
     /// Rebuild the flattened group tree and the entry list from the database.
     /// Selections are kept by ID where possible.
     pub fn rebuild(&mut self) {
-        let prev_entry = self.sel_entry;
         let Some(v) = &self.vault else { return };
 
         let mut rows = Vec::new();
@@ -2038,7 +2082,13 @@ impl App {
         {
             self.sel_group = self.group_rows.first().map(|(g, _)| *g);
         }
+        self.rebuild_entries();
+    }
 
+    /// Rebuild just the entry list: enough when only the search changed.
+    fn rebuild_entries(&mut self) {
+        let prev_entry = self.sel_entry;
+        let Some(v) = &self.vault else { return };
         self.entry_rows = match self.search.as_deref() {
             Some(q) if !q.trim().is_empty() => v.search(q),
             _ => {
@@ -2172,7 +2222,8 @@ fn minutes(d: Duration) -> String {
     }
 }
 
-fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
+/// Move `idx` by `delta` within a list of `len` rows.
+pub(crate) fn clamp_move(idx: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
         return 0;
     }
@@ -2240,6 +2291,40 @@ mod tests {
         db.save(&mut file, keepass::DatabaseKey::new().with_password("pw"))
             .unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn scheduled_work_starts_right_after_the_next_draw() {
+        // Creating a database: Enter schedules it, a tick doesn't run it (the
+        // "Creating…" frame comes first), and run_pending does.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.kdbx");
+        let mut app = App::new(Some(path.clone()), None, None);
+        let Screen::Create(st) = &mut app.screen else {
+            panic!("expected the new-database screen");
+        };
+        st.fields[C_PASS].set_text("pw");
+        st.fields[C_CONFIRM].set_text("pw");
+        app.on_key(ctrl('s'));
+        app.on_tick();
+        assert!(!path.exists(), "created before Creating… was drawn");
+        assert!(app.run_pending());
+        assert!(matches!(app.screen, Screen::Browser) && path.exists());
+        assert!(!app.run_pending(), "nothing left to do");
+
+        // Unlocking: run_pending starts the background work right away.
+        let (_dir, path) = vault_file(|_| {});
+        let mut app = App::new(Some(path), None, None);
+        let Screen::Unlock(st) = &mut app.screen else {
+            panic!("expected the unlock screen");
+        };
+        st.password.set_text("pw");
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.busy());
+        assert!(app.run_pending());
+        assert!(app.busy());
+        finish_unlock(&mut app);
+        assert!(matches!(app.screen, Screen::Browser));
     }
 
     #[test]
@@ -2421,12 +2506,33 @@ mod tests {
     }
 
     #[test]
+    fn saving_shows_saving_first() {
+        let (_dir, mut app) = lockable();
+        app.dirty = true;
+        let path = app.vault.as_ref().unwrap().path.clone();
+        let before = std::fs::read(&path).unwrap();
+
+        // Ctrl-s only schedules the save, so "Saving…" can be drawn before
+        // the (possibly slow) key derivation blocks the UI...
+        app.on_key(ctrl('s'));
+        assert!(draw_at(&app, 80, 24).contains("Saving…"));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "saved too early");
+
+        // ...and the main loop runs it right after that frame.
+        assert!(app.run_pending());
+        assert_ne!(std::fs::read(&path).unwrap(), before);
+        assert!(!app.dirty);
+        assert!(draw_at(&app, 80, 24).contains("saved test.kdbx"));
+    }
+
+    #[test]
     fn asks_before_overwriting_external_changes() {
         let (_dir, mut app) = lockable();
         let path = app.vault.as_ref().unwrap().path.clone();
         std::fs::write(&path, b"written by another program").unwrap();
 
         app.on_key(ctrl('s'));
+        app.run_pending();
         assert!(matches!(
             app.overlay,
             Some(Overlay::Confirm(ConfirmState {
@@ -2435,6 +2541,7 @@ mod tests {
             }))
         ));
         app.on_key(key(KeyCode::Char('y')));
+        app.run_pending();
         assert!(app.overlay.is_none());
         assert!(matches!(&app.status, Some((msg, StatusKind::Info, _)) if msg.contains("saved")));
         let bak = path.with_file_name("test.kdbx.bak");
@@ -2570,6 +2677,7 @@ mod tests {
 
         // And they survive a save.
         app.on_key(ctrl('s'));
+        app.run_pending();
         let path = app.vault.as_ref().unwrap().path.clone();
         app.vault = Some(Vault::open(&path, "pw", None).unwrap());
         assert_eq!(deleted(&app), [true; 3]);

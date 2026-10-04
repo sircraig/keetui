@@ -28,6 +28,8 @@ use zeroize::Zeroizing;
 use crate::clipboard::Clipboard;
 
 const TICK: Duration = Duration::from_millis(250);
+/// Tick faster while an unlock runs in the background, to pick it up soon.
+const BUSY_TICK: Duration = Duration::from_millis(25);
 /// How long a termination signal waits for the main loop to exit by itself.
 const SIGNAL_GRACE: Duration = Duration::from_millis(500);
 /// How long it then waits for a save in progress, which may run a slow key
@@ -100,6 +102,7 @@ fn main() -> Result<()> {
         execute!(stdout(), EnableMouseCapture)?;
     }
     let res = run(&mut terminal, &mut app, &quit);
+    app.finish_pending_save();
     clipboard.clear_now();
     release_terminal(mouse);
     // Not `restore()`: after SIGHUP the terminal is gone, and its error
@@ -182,8 +185,14 @@ fn run(
     while !app.should_quit && !quit.load(Ordering::Relaxed) {
         if redraw {
             terminal.draw(|f| ui::draw(f, app))?;
+            // Work the last input scheduled (unlocking, creating a database)
+            // starts now that the frame announcing it is on screen.
+            if app.run_pending() {
+                continue;
+            }
         }
-        let timeout = TICK.saturating_sub(last_tick.elapsed());
+        let tick = if app.busy() { BUSY_TICK } else { TICK };
+        let timeout = tick.saturating_sub(last_tick.elapsed());
         redraw = false;
         if cevent::poll(timeout)? {
             match cevent::read()? {
@@ -209,7 +218,7 @@ fn run(
         }
         // Tick on wall-clock time rather than on idle timeouts, so constant
         // mouse motion can't starve status expiry, unlock, or TOTP refresh.
-        if last_tick.elapsed() >= TICK {
+        if last_tick.elapsed() >= tick {
             app.on_tick();
             last_tick = Instant::now();
             redraw = true;

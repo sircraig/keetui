@@ -172,12 +172,7 @@ impl PickerState {
     }
 
     pub fn move_by(&mut self, delta: isize) {
-        let len = self.visible().len();
-        if len > 0 {
-            self.selected = (self.selected as isize)
-                .saturating_add(delta)
-                .clamp(0, len as isize - 1) as usize;
-        }
+        self.selected = crate::app::clamp_move(self.selected, delta, self.visible().len());
     }
 
     pub fn select(&mut self, index: usize) {

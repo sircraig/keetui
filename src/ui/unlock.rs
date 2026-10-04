@@ -1,11 +1,11 @@
 //! The unlock and new-database screens.
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
-use ratatui::style::{Style, Stylize};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::style::Stylize;
+use ratatui::text::Span;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{
     App, C_CONFIRM, C_KEYFILE, C_PASS, CREATE_FIELD_LABELS, CreateState, Hit, StatusKind,
@@ -13,25 +13,14 @@ use crate::app::{
 };
 
 use super::{
-    ACCENT, DIM, ERR, OK, WARN, btn, buttons, centered, hit, mask, scroll_window, truncate,
+    ACCENT, DIM, ERR, FORM_LABEL_W, OK, WARN, btn, buttons, ctrl, field_label, hit, key, mask,
+    modal_with_margin, scroll_window, truncate,
 };
-
-const LABEL_W: u16 = 11;
-
-fn key(code: KeyCode, mods: KeyModifiers) -> Hit {
-    Hit::Key(KeyEvent::new(code, mods))
-}
 
 /// The bordered box shared by both screens; returns its padded inner area.
 fn panel(frame: &mut Frame, h: u16, title: &'static str) -> Option<Rect> {
-    let modal = centered(66, h, frame.area());
-    frame.render_widget(Clear, modal);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Span::raw(title).fg(ACCENT).bold());
-    let inner = block.inner(modal).inner(Margin::new(2, 1));
-    frame.render_widget(block, modal);
+    let area = frame.area();
+    let inner = modal_with_margin(frame, area, (66, h), title, ACCENT, Margin::new(2, 1));
     // Only draw the form when all of it fits (border + padding = 4 rows).
     (inner.height + 4 >= h).then_some(inner)
 }
@@ -122,21 +111,13 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
         },
     );
 
-    let mut btns = vec![btn("⏎", "unlock", key(KeyCode::Enter, KeyModifiers::NONE))];
+    let mut btns = vec![btn("⏎", "unlock", key(KeyCode::Enter))];
     // Switching databases would drop the unsaved work held by the lock.
     if !app.locked_with_unsaved_work() {
-        btns.push(btn(
-            "^o",
-            "open other",
-            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
-        ));
-        btns.push(btn(
-            "^n",
-            "new",
-            key(KeyCode::Char('n'), KeyModifiers::CONTROL),
-        ));
+        btns.push(btn("^o", "open other", ctrl('o')));
+        btns.push(btn("^n", "new", ctrl('n')));
     }
-    btns.push(btn("esc", "quit", key(KeyCode::Esc, KeyModifiers::NONE)));
+    btns.push(btn("esc", "quit", key(KeyCode::Esc)));
     buttons(frame, app, inner.x, inner.bottom() - 1, inner.right(), btns);
 
     if !st.working {
@@ -193,7 +174,7 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
                 ("✗ differs", ERR)
             };
             let w = mark.chars().count() as u16;
-            if r.width > LABEL_W + w + 8 {
+            if r.width > FORM_LABEL_W + w + 8 {
                 frame.render_widget(
                     Paragraph::new(Span::raw(mark).fg(color)),
                     Rect::new(r.right() - w, r.y, w, 1),
@@ -223,19 +204,11 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
         inner.right(),
         vec![
             // Ctrl-s creates from any field (Enter only on the last ones).
-            btn(
-                "^s",
-                "create",
-                key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-            ),
-            btn(
-                "^r",
-                if st.reveal { "hide" } else { "show" },
-                key(KeyCode::Char('r'), KeyModifiers::CONTROL),
-            ),
+            btn("^s", "create", ctrl('s')),
+            btn("^r", if st.reveal { "hide" } else { "show" }, ctrl('r')),
             // Esc always goes back: to the unlock screen when there is a
             // database to unlock, otherwise to the file picker.
-            btn("esc", "back", key(KeyCode::Esc, KeyModifiers::NONE)),
+            btn("esc", "back", key(KeyCode::Esc)),
         ],
     );
     hint(frame, inner, "tab next field");
@@ -259,16 +232,8 @@ fn input_row(
     placeholder: Option<&str>,
 ) -> Position {
     hit(app, row, Hit::LoginField(index));
-    let label = if focused {
-        Line::from(vec![
-            Span::raw("▌").fg(ACCENT),
-            Span::raw(label.to_string()).fg(ACCENT).bold(),
-        ])
-    } else {
-        Line::from(vec![Span::raw(" "), Span::raw(label.to_string()).fg(DIM)])
-    };
-    frame.render_widget(Paragraph::new(label), row);
-    let x = row.x + LABEL_W;
+    field_label(frame, row, label, focused);
+    let x = row.x + FORM_LABEL_W;
     let w = row.right().saturating_sub(x);
     let (shown, col) = scroll_window(chars, field.cursor, w as usize);
     let value = match placeholder {

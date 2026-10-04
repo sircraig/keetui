@@ -6,10 +6,11 @@ mod unlock;
 
 use chrono::{NaiveDateTime, TimeZone};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Hit, Screen};
@@ -65,6 +66,45 @@ fn modal_begin(app: &App) {
     app.hits.borrow_mut().clear();
 }
 
+/// Width of the label column in forms: the entry and group editors and
+/// the unlock and new-database screens.
+pub(crate) const FORM_LABEL_W: u16 = 11;
+
+/// A form field's label: an accent bar and bold when focused, dim otherwise.
+pub(crate) fn field_label(frame: &mut Frame, row: Rect, name: &str, focused: bool) {
+    let line = if focused {
+        Line::from(vec![
+            Span::raw("▌").fg(ACCENT),
+            Span::raw(name.to_string()).fg(ACCENT).bold(),
+        ])
+    } else {
+        Line::from(vec![Span::raw(" "), Span::raw(name.to_string()).fg(DIM)])
+    };
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect {
+            height: 1,
+            width: FORM_LABEL_W.min(row.width),
+            ..row
+        },
+    );
+}
+
+/// A click that replays a key press.
+pub(crate) fn key(code: KeyCode) -> Hit {
+    Hit::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// A click that replays a character key.
+pub(crate) fn ch(c: char) -> Hit {
+    key(KeyCode::Char(c))
+}
+
+/// A click that replays Ctrl plus a character.
+pub(crate) fn ctrl(c: char) -> Hit {
+    Hit::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+}
+
 pub(crate) fn hit(app: &App, rect: Rect, h: Hit) {
     app.hits.borrow_mut().push((rect, h));
 }
@@ -85,6 +125,38 @@ pub(crate) fn selection_style(focused: bool) -> Style {
             .fg(Color::Reset)
             .add_modifier(Modifier::REVERSED)
     }
+}
+
+/// A modal window: a cleared, rounded, titled box of at most `size`
+/// centered in `area`. Returns its inside, padded by one cell.
+pub(crate) fn modal(
+    frame: &mut Frame,
+    area: Rect,
+    size: (u16, u16),
+    title: &'static str,
+    color: Color,
+) -> Rect {
+    modal_with_margin(frame, area, size, title, color, Margin::new(1, 1))
+}
+
+/// Like `modal`, padded by `margin` instead.
+pub(crate) fn modal_with_margin(
+    frame: &mut Frame,
+    area: Rect,
+    (w, h): (u16, u16),
+    title: &'static str,
+    color: Color,
+    margin: Margin,
+) -> Rect {
+    let rect = centered(w, h, area);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(color))
+        .title(Span::raw(title).fg(color).bold());
+    let inner = block.inner(rect).inner(margin);
+    frame.render_widget(block, rect);
+    inner
 }
 
 /// A rect of at most `w` x `h`, centered in `area`.
@@ -126,6 +198,28 @@ where
     Tz::Offset: std::fmt::Display,
 {
     zone.from_utc_datetime(&utc).format(format).to_string()
+}
+
+/// The first row to show of a list of `len` rows in `height` lines, so that
+/// `selected` is in view, scrolling as little as possible from `offset`.
+/// This is what ratatui's List does for one-line items; working it out
+/// up front lets callers build only the rows that fit.
+pub(crate) fn scroll_offset(
+    offset: usize,
+    selected: Option<usize>,
+    height: usize,
+    len: usize,
+) -> usize {
+    let last = len.saturating_sub(1);
+    let mut offset = offset.min(last);
+    if let Some(selected) = selected.map(|s| s.min(last)) {
+        if selected < offset {
+            offset = selected;
+        } else if height > 0 && selected >= offset + height {
+            offset = selected + 1 - height;
+        }
+    }
+    offset
 }
 
 /// Truncate to `max` terminal cells, marking the cut with an ellipsis.
@@ -352,6 +446,37 @@ mod tests {
         assert_eq!(skip_cells("クレジット", 4), ("ジット", 4));
         // A wide character straddling the cut is dropped whole.
         assert_eq!(skip_cells("クレジット", 3), ("ジット", 4));
+    }
+
+    #[test]
+    fn scroll_offset_matches_ratatui_list() {
+        use ratatui::widgets::{List, ListState};
+        for len in 0..12 {
+            for height in 1..6u16 {
+                for offset in 0..14 {
+                    for selected in std::iter::once(None).chain((0..14).map(Some)) {
+                        let items: Vec<&str> = vec!["row"; len];
+                        let mut state = ListState::default()
+                            .with_offset(offset)
+                            .with_selected(selected);
+                        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 8, height));
+                        ratatui::widgets::StatefulWidget::render(
+                            List::new(items),
+                            buffer.area,
+                            &mut buffer,
+                            &mut state,
+                        );
+                        if len > 0 {
+                            assert_eq!(
+                                scroll_offset(offset, selected, height.into(), len),
+                                state.offset(),
+                                "len {len} height {height} offset {offset} selected {selected:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

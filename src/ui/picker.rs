@@ -2,35 +2,34 @@ use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Hit};
 use crate::picker::{ItemKind, PickerState, size_label, tilde};
 
-use super::{ACCENT, DIM, ERR, btn, buttons, centered, hit, scroll_window, selection_style, width};
-
-fn key(code: KeyCode, mods: KeyModifiers) -> Hit {
-    Hit::Key(KeyEvent::new(code, mods))
-}
+use super::{
+    ACCENT, DIM, ERR, btn, buttons, ctrl, hit, key, modal_with_margin, scroll_offset,
+    scroll_window, selection_style, width,
+};
 
 pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     let area = frame.area();
-    let modal = centered(
+    let size = (
         area.width.saturating_sub(4).min(96),
         area.height.saturating_sub(2).min(30),
-        area,
     );
-    frame.render_widget(Clear, modal);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Span::raw(" 📂 Open database ").fg(ACCENT).bold());
-    let inner = block.inner(modal).inner(Margin::new(1, 0));
-    frame.render_widget(block, modal);
+    let inner = modal_with_margin(
+        frame,
+        area,
+        size,
+        " 📂 Open database ",
+        ACCENT,
+        Margin::new(1, 0),
+    );
     if inner.height < 7 || inner.width < 20 {
         return;
     }
@@ -65,12 +64,12 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height - 5);
     app.page_rows.set(list.height.max(1) as usize);
     let visible = st.visible();
-    let mut offset = st.offset.get();
-    if st.selected < offset {
-        offset = st.selected;
-    } else if st.selected >= offset + list.height as usize {
-        offset = st.selected + 1 - list.height as usize;
-    }
+    let offset = scroll_offset(
+        st.offset.get(),
+        Some(st.selected),
+        list.height.into(),
+        visible.len(),
+    );
     st.offset.set(offset);
 
     for (r, (vi, &ii)) in visible
@@ -159,19 +158,15 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
         inner.bottom() - 1,
         inner.right(),
         vec![
-            btn("⏎", "open", key(KeyCode::Enter, KeyModifiers::NONE)),
-            btn("⌫", "up", key(KeyCode::Left, KeyModifiers::NONE)),
-            btn(
-                "^n",
-                "new database",
-                key(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            ),
+            btn("⏎", "open", key(KeyCode::Enter)),
+            btn("⌫", "up", key(KeyCode::Left)),
+            btn("^n", "new database", ctrl('n')),
             btn(
                 "^a",
                 if st.show_all { "kdbx only" } else { "show all" },
-                key(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                ctrl('a'),
             ),
-            btn("esc", back, key(KeyCode::Esc, KeyModifiers::NONE)),
+            btn("esc", back, key(KeyCode::Esc)),
         ],
     );
 }
