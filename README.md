@@ -84,14 +84,14 @@ the terminal instead, or start with `--no-mouse`.
 
 ### Entry editor
 
-`Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password and TOTP
-secret (both are masked otherwise), `Ctrl-g`
-generates one, `Ctrl-u` clears the field, `Ctrl-s` saves the entry, `Esc`
-cancels. Pasting inserts into the focused field (line breaks are kept only
-in Notes); outside a text field or the search box a paste is ignored, so
-pasted text never runs as commands. The OTP field accepts an `otpauth://` URL or a bare base32 secret
-(stored KeePassXC-compatibly). Custom fields, tags and attachments are shown
-read-only and kept intact when editing.
+`Tab`/`↑`/`↓` move between fields, `Ctrl-r` shows the password and TOTP secret
+(both are masked otherwise), `Ctrl-g` generates a password, `Ctrl-u` clears
+the field, `Ctrl-s` saves the entry, `Esc` cancels. Pasting inserts into the
+focused field (line breaks are kept only in Notes); outside a text field or
+the search box a paste is ignored, so pasted text never runs as commands. The
+OTP field accepts an `otpauth://` URL or a bare base32 secret (stored
+KeePassXC-compatibly). Custom fields, tags and attachments are shown read-only
+and kept intact when editing.
 
 URLs without a scheme open as `https://`. `cmd://`, `file://` and other
 non-web schemes are refused, and `mailto:` links open without their query
@@ -102,11 +102,11 @@ part (some mail clients would attach local files named in it).
 Saves are atomic: the database is serialized, verified by re-parsing, the old
 file is backed up to `<name>.kdbx.bak`, and the new file replaces the original
 via rename (each written to a fresh file first, so a symlink in the way is
-replaced, never written through). A vault opened through a symlink is saved
-to the link's target. If another program changed the file since keetui
-opened or last saved it, keetui asks before overwriting those changes. A database opened from a KDBX3 file is written back as KDBX4
-(KeePassXC-compatible) with the same Argon2d settings as new databases, after
-a one-time confirmation.
+replaced, never written through). A vault opened through a symlink is saved to
+the link's target. If another program changed the file since keetui opened or
+last saved it, keetui asks before overwriting those changes. A database opened
+from a KDBX3 file is written back as KDBX4 (KeePassXC-compatible) with the
+same Argon2d settings as new databases, after a one-time confirmation.
 
 Entry edits record the previous version in KeePass history, like KeePassXC.
 
@@ -115,10 +115,10 @@ Entry edits record the previous version in KeePass history, like KeePassXC.
 Copies go through `wl-copy` (Wayland required) and are marked sensitive
 (`--sensitive`, wl-clipboard 2.3+), so clipboard history managers that honor
 the hint don't record them. They auto-clear after 15 seconds, or as soon as
-keetui exits — on quit, on a crash, or when the
-terminal is closed — since `wl-copy` would otherwise keep serving the secret.
-Caveat: if you copy something else in another application during those 15
-seconds, the auto-clear will clear that too.
+keetui exits — on quit, on a crash, or when the terminal is closed — since
+`wl-copy` would otherwise keep serving the secret. Caveat: if you copy
+something else in another application during those 15 seconds, the auto-clear
+will clear that too.
 
 ## Security notes
 
