@@ -1105,6 +1105,15 @@ impl App {
     }
 
     fn init_after_unlock(&mut self) {
+        // Opened afresh, maybe after another database was locked: nothing
+        // carries over from that one.
+        self.convert_ack = false;
+        self.search = None;
+        self.search_input = false;
+        self.pane = Pane::Groups;
+        self.sel_entry = None;
+        self.group_offset.set(0);
+        self.entry_offset.set(0);
         let Some(v) = &self.vault else { return };
         let root = v.db.root().id();
         self.expanded =
@@ -2476,6 +2485,40 @@ mod tests {
         enter_password(&mut app, "pw");
         assert!(matches!(&app.screen, Screen::GroupEdit(f) if f.name.text.as_str() == "Draft"));
         assert!(!app.locked_with_unsaved_work());
+    }
+
+    #[test]
+    fn another_database_opens_with_a_fresh_view() {
+        let (_dir, mut app) = lockable();
+        app.convert_ack = true;
+        app.on_key(key(KeyCode::Char('/')));
+        app.on_paste("Bravo");
+        app.on_key(ctrl('l'));
+        assert!(
+            app.vault.is_none(),
+            "nothing unsaved, so the vault is dropped"
+        );
+
+        // From the lock screen, open a different database.
+        let (_other_dir, other) = vault_file(|db| {
+            db.root_mut()
+                .add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "Other-entry"));
+        });
+        app.on_picker_outcome(picker::Outcome::Open(other));
+        enter_password(&mut app, "pw");
+        assert!(matches!(app.screen, Screen::Browser));
+        let mut stale = Vec::new();
+        if app.search.is_some() {
+            stale.push("search");
+        }
+        if app.pane != Pane::Groups {
+            stale.push("pane");
+        }
+        if app.convert_ack {
+            stale.push("consent to convert the other database's format");
+        }
+        assert!(stale.is_empty(), "carried over: {stale:?}");
     }
 
     #[test]
