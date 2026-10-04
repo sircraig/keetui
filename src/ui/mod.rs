@@ -4,6 +4,7 @@ mod overlays;
 mod picker;
 mod unlock;
 
+use chrono::{NaiveDateTime, TimeZone};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -91,6 +92,18 @@ pub(crate) const HIDDEN: &str = "••••••••";
 
 pub(crate) fn width(s: &str) -> u16 {
     s.chars().count() as u16
+}
+
+/// Format a UTC timestamp (keepass stores them in UTC) in local time.
+pub(crate) fn local_time(utc: NaiveDateTime, format: &str) -> String {
+    in_zone(utc, &chrono::Local, format)
+}
+
+fn in_zone<Tz: TimeZone>(utc: NaiveDateTime, zone: &Tz, format: &str) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    zone.from_utc_datetime(&utc).format(format).to_string()
 }
 
 /// Truncate to `max` chars, marking the cut with an ellipsis.
@@ -231,6 +244,23 @@ mod tests {
         assert_eq!(scroll_window(&chars, 3, 5), ("abcde".to_string(), 3));
         assert_eq!(scroll_window(&chars, 10, 5), ("ghij".to_string(), 4));
         assert_eq!(scroll_window(&chars, 7, 5), ("defgh".to_string(), 4));
+    }
+
+    #[test]
+    fn times_are_shown_in_the_local_zone() {
+        let at = |h| {
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 4)
+                .unwrap()
+                .and_hms_opt(h, 44, 0)
+                .unwrap()
+        };
+        let utc_plus_8 = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(
+            in_zone(at(14), &utc_plus_8, "%Y-%m-%d %H:%M"),
+            "2026-10-04 22:44"
+        );
+        // Late evening UTC is already the next day here.
+        assert_eq!(in_zone(at(20), &utc_plus_8, "%Y-%m-%d"), "2026-10-05");
     }
 
     #[test]

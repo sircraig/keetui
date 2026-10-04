@@ -639,7 +639,7 @@ fn footer_line(
     modified: Option<NaiveDateTime>,
     created: Option<NaiveDateTime>,
 ) -> Line<'static> {
-    let fmt = |t: NaiveDateTime| t.format("%Y-%m-%d %H:%M").to_string();
+    let fmt = |t: NaiveDateTime| super::local_time(t, "%Y-%m-%d %H:%M");
     let mut spans = Vec::new();
     if expires == Some(true)
         && let Some(exp) = expiry
