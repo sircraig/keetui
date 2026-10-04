@@ -79,16 +79,19 @@ fn main() -> Result<()> {
     let quit = Arc::new(AtomicBool::new(false));
     watch_signals(clipboard.clone(), Arc::clone(&quit), mouse)?;
 
+    // The panic hook clears the clipboard and restores the terminal (mouse
+    // capture and bracketed paste included), so a crash leaves neither a
+    // secret nor an unusable shell behind. It replaces ratatui's hook, whose
+    // restore() reports failure with eprintln!: once the terminal is gone
+    // (SIGHUP) that panics inside the hook and aborts the process.
+    let default_hook = std::panic::take_hook();
     let mut terminal = ratatui::init();
-    // ratatui's panic hook restores the terminal; ours runs first to clear
-    // the clipboard and to release mouse capture, which ratatui knows nothing
-    // about, so a crash leaves neither a secret nor an unusable shell behind.
-    let hook = std::panic::take_hook();
     let on_panic = clipboard.clone();
     std::panic::set_hook(Box::new(move |info| {
         on_panic.clear_now();
         release_terminal(mouse);
-        hook(info);
+        let _ = ratatui::try_restore();
+        default_hook(info);
     }));
     // Bracketed paste delivers a paste as one event instead of keystrokes,
     // so pasted text can't run as commands.
@@ -102,6 +105,11 @@ fn main() -> Result<()> {
     // Not `restore()`: after SIGHUP the terminal is gone, and its error
     // report would panic writing to it.
     let _ = ratatui::try_restore();
+    // Dropping the Terminal re-shows a hidden cursor and reports failure the
+    // same way; when that fails, skip the drop.
+    if terminal.show_cursor().is_err() {
+        std::mem::forget(terminal);
+    }
     res
 }
 
