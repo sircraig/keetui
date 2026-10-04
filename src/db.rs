@@ -89,19 +89,12 @@ impl Vault {
 
         if self.path.is_file() {
             let bak = backup_path(&self.path);
-            fs::copy(&self.path, &bak)
+            let old = fs::read(&self.path)
+                .with_context(|| format!("cannot read {}", self.path.display()))?;
+            write_atomic(&bak, &old)
                 .with_context(|| format!("failed to write backup {}", bak.display()))?;
         }
-
-        let dir = match self.path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        // NamedTempFile is created 0600 on unix.
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).context("failed to create temp file")?;
-        tmp.write_all(&buf)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(&self.path)
+        write_atomic(&self.path, &buf)
             .with_context(|| format!("failed to replace {}", self.path.display()))?;
 
         Ok(())
@@ -204,6 +197,22 @@ fn build_key(password: &str, keyfile: Option<&Path>) -> Result<DatabaseKey> {
     Ok(key)
 }
 
+/// Write `data` to a fresh temp file next to `path` (0600 on unix) and
+/// rename it over `path`. Readers see the old or the new file, never a
+/// partial one, and a symlink at `path` is replaced rather than written
+/// through (`fs::copy` would follow it and clobber the link's target).
+fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).context("failed to create temp file")?;
+    tmp.write_all(data)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)?;
+    Ok(())
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -233,6 +242,51 @@ fn friendly_open_error(e: DatabaseOpenError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vault saved with cheap key derivation (password "pw"), opened.
+    fn cheap_vault(path: &Path) -> Vault {
+        let mut db = Database::new();
+        if let KdfConfig::Argon2 {
+            iterations,
+            memory,
+            parallelism,
+            ..
+        } = &mut db.config.kdf_config
+        {
+            (*iterations, *memory, *parallelism) = (1, 64 * 1024, 1);
+        }
+        db.root_mut()
+            .add_entry()
+            .edit(|e| e.set_protected(fields::PASSWORD, "secret"));
+        let mut file = fs::File::create(path).unwrap();
+        db.save(&mut file, DatabaseKey::new().with_password("pw"))
+            .unwrap();
+        Vault::open(path, "pw", None).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_replaces_a_symlink_instead_of_writing_through_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.kdbx");
+        let mut vault = cheap_vault(&path);
+        let before = fs::read(&path).unwrap();
+
+        // Someone who can write to the folder plants v.kdbx.bak -> victim.
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"precious").unwrap();
+        let bak = dir.path().join("v.kdbx.bak");
+        std::os::unix::fs::symlink(&victim, &bak).unwrap();
+
+        vault.save().unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"precious");
+        let meta = fs::symlink_metadata(&bak).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&bak).unwrap(), before);
+    }
 
     #[test]
     fn create_writes_a_reopenable_database() {
