@@ -46,7 +46,10 @@ pub fn draw(frame: &mut Frame, app: &App, overlay: &Overlay) {
 fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
     let destructive = matches!(
         cs.pending,
-        PendingAction::DeleteEntry(_) | PendingAction::DeleteGroup(_) | PendingAction::DiscardForm
+        PendingAction::DeleteEntry(_)
+            | PendingAction::DeleteGroup(_)
+            | PendingAction::DiscardForm
+            | PendingAction::OverwriteExternal { .. }
     );
     let color = if destructive { ERR } else { WARN };
     let inner = modal(frame, 62, 8, " Confirm ", color);
@@ -80,6 +83,9 @@ fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
                 btn("y", "save as KDBX4", ch('y')),
                 btn("n", "cancel", ch('n')),
             ]
+        }
+        PendingAction::OverwriteExternal { .. } => {
+            vec![btn("y", "overwrite", ch('y')), btn("n", "cancel", ch('n'))]
         }
     };
     buttons(frame, app, inner.x, inner.bottom() - 1, inner.right(), btns);

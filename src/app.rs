@@ -14,7 +14,7 @@ use ratatui::layout::{Position, Rect};
 use zeroize::Zeroizing;
 
 use crate::clipboard::{Clipboard, DEFAULT_TTL};
-use crate::db::Vault;
+use crate::db::{ChangedOnDisk, Vault};
 use crate::event::{Action, browser_action};
 use crate::generator::{self, GenOpts, MAX_LENGTH, MIN_LENGTH};
 use crate::picker::{self, PickerState};
@@ -304,7 +304,13 @@ pub enum PendingAction {
     DeleteEntry(EntryId),
     DeleteGroup(GroupId),
     DiscardForm,
-    ConvertKdbx3 { then_quit: bool },
+    ConvertKdbx3 {
+        then_quit: bool,
+    },
+    /// Save over changes another program made to the file.
+    OverwriteExternal {
+        then_quit: bool,
+    },
     QuitDirty,
 }
 
@@ -1690,12 +1696,16 @@ impl App {
             }));
             return;
         }
-        self.do_save(then_quit);
+        self.do_save(then_quit, false);
     }
 
-    fn do_save(&mut self, then_quit: bool) {
+    fn do_save(&mut self, then_quit: bool, overwrite: bool) {
         let Some(v) = &mut self.vault else { return };
-        let res = v.save();
+        let res = if overwrite {
+            v.save_overwriting()
+        } else {
+            v.save()
+        };
         let name = v.file_name();
         match res {
             Ok(()) => {
@@ -1704,6 +1714,16 @@ impl App {
                 if then_quit {
                     self.should_quit = true;
                 }
+            }
+            Err(e) if e.is::<ChangedOnDisk>() => {
+                self.overlay = Some(Overlay::Confirm(ConfirmState {
+                    prompt: format!(
+                        "{name} was changed by another program since keetui opened it. \
+                         Overwrite those changes with yours? (The current file is \
+                         kept as {name}.bak.)"
+                    ),
+                    pending: PendingAction::OverwriteExternal { then_quit },
+                }))
             }
             Err(e) => self.set_error(format!("save failed: {e:#}")),
         }
@@ -1812,8 +1832,9 @@ impl App {
             PendingAction::DiscardForm => self.screen = Screen::Browser,
             PendingAction::ConvertKdbx3 { then_quit } => {
                 self.kdbx3_ack = true;
-                self.do_save(then_quit);
+                self.do_save(then_quit, false);
             }
+            PendingAction::OverwriteExternal { then_quit } => self.do_save(then_quit, true),
             PendingAction::QuitDirty => {}
         }
     }
@@ -2151,6 +2172,27 @@ mod tests {
         assert_eq!(form.fields[F_TITLE].text.as_str(), "Titlewithtabs");
         assert_eq!(form.fields[F_NOTES].text.as_str(), "one\ntwo[31m");
         assert!(form.modified);
+    }
+
+    #[test]
+    fn asks_before_overwriting_external_changes() {
+        let (_dir, mut app) = lockable();
+        let path = app.vault.as_ref().unwrap().path.clone();
+        std::fs::write(&path, b"written by another program").unwrap();
+
+        app.on_key(ctrl('s'));
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Confirm(ConfirmState {
+                pending: PendingAction::OverwriteExternal { then_quit: false },
+                ..
+            }))
+        ));
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(app.overlay.is_none());
+        assert!(matches!(&app.status, Some((msg, StatusKind::Info, _)) if msg.contains("saved")));
+        let bak = path.with_file_name("test.kdbx.bak");
+        assert_eq!(std::fs::read(bak).unwrap(), b"written by another program");
     }
 
     #[test]

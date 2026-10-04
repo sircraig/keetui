@@ -17,19 +17,41 @@ pub struct Vault {
     // Retained for the whole session because `Database::save` requires the key
     // again. DatabaseKey is ZeroizeOnDrop.
     key: DatabaseKey,
+    /// The real file, symlinks resolved.
     pub path: PathBuf,
+    /// The (encrypted) file contents as last read or written, to notice when
+    /// another program changes the file underneath us.
+    on_disk: Vec<u8>,
 }
+
+/// Saving would overwrite changes another program (KeePassXC, a sync
+/// client, a second keetui) made to the file since keetui read it.
+#[derive(Debug)]
+pub struct ChangedOnDisk;
+
+impl std::fmt::Display for ChangedOnDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the file was changed by another program since it was opened")
+    }
+}
+
+impl std::error::Error for ChangedOnDisk {}
 
 impl Vault {
     pub fn open(path: &Path, password: &str, keyfile: Option<&Path>) -> Result<Self> {
-        let data = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+        // Work on the real file, so that saving through a symlink updates its
+        // target instead of replacing the link with a regular file.
+        let path =
+            fs::canonicalize(path).with_context(|| format!("cannot read {}", path.display()))?;
+        let data = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let key = build_key(password, keyfile)?;
         let db = Database::parse(&data, key.clone()).map_err(friendly_open_error)?;
 
         Ok(Vault {
             db,
             key,
-            path: path.to_path_buf(),
+            path,
+            on_disk: data,
         })
     }
 
@@ -54,6 +76,7 @@ impl Vault {
             db,
             key,
             path: path.to_path_buf(),
+            on_disk: Vec::new(),
         };
         vault.save()?;
         Ok(vault)
@@ -71,7 +94,18 @@ impl Vault {
     }
 
     /// Serialize, verify, back up the old file, then atomically replace it.
+    /// Fails with [`ChangedOnDisk`] if another program changed the file.
     pub fn save(&mut self) -> Result<()> {
+        self.write(false)
+    }
+
+    /// Save even though another program changed the file since keetui read
+    /// it, discarding those changes (the old file still goes to the backup).
+    pub fn save_overwriting(&mut self) -> Result<()> {
+        self.write(true)
+    }
+
+    fn write(&mut self, overwrite: bool) -> Result<()> {
         if self.needs_kdbx4_upgrade() {
             // The crate can only write KDBX4; adopt keetui's config for new files.
             self.db.config = new_db_config();
@@ -88,14 +122,19 @@ impl Vault {
         })?;
 
         if self.path.is_file() {
-            let bak = backup_path(&self.path);
             let old = fs::read(&self.path)
                 .with_context(|| format!("cannot read {}", self.path.display()))?;
+            // Checked as late as possible, right before replacing the file.
+            if !overwrite && old != self.on_disk {
+                return Err(ChangedOnDisk.into());
+            }
+            let bak = backup_path(&self.path);
             write_atomic(&bak, &old)
                 .with_context(|| format!("failed to write backup {}", bak.display()))?;
         }
         write_atomic(&self.path, &buf)
             .with_context(|| format!("failed to replace {}", self.path.display()))?;
+        self.on_disk = buf;
 
         Ok(())
     }
@@ -262,6 +301,51 @@ mod tests {
         db.save(&mut file, DatabaseKey::new().with_password("pw"))
             .unwrap();
         Vault::open(path, "pw", None).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saves_through_a_symlinked_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sync")).unwrap();
+        let real = dir.path().join("sync/v.kdbx");
+        drop(cheap_vault(&real));
+        let link = dir.path().join("v.kdbx");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut vault = Vault::open(&link, "pw", None).unwrap();
+        vault.db.root_mut().add_entry();
+        vault.save().unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(Vault::open(&real, "pw", None).unwrap().db.num_entries(), 2);
+        assert!(dir.path().join("sync/v.kdbx.bak").is_file());
+        assert!(!dir.path().join("v.kdbx.bak").exists());
+    }
+
+    #[test]
+    fn asks_before_overwriting_changes_made_by_another_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.kdbx");
+        let mut ours = cheap_vault(&path);
+        let mut theirs = Vault::open(&path, "pw", None).unwrap();
+        theirs.db.root_mut().add_entry();
+        theirs.save().unwrap();
+
+        ours.db.root_mut().add_entry();
+        let err = ours.save().unwrap_err();
+        assert!(err.is::<ChangedOnDisk>(), "{err:#}");
+        let theirs_on_disk = fs::read(&path).unwrap();
+
+        ours.save_overwriting().unwrap();
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), theirs_on_disk);
+        // Our own write is now the known state: plain saves work again.
+        ours.save().unwrap();
     }
 
     #[cfg(unix)]

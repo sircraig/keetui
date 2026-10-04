@@ -97,8 +97,11 @@ non-web schemes are refused.
 ## Saving
 
 Saves are atomic: the database is serialized, verified by re-parsing, the old
-file is copied to `<name>.kdbx.bak`, and the new file replaces the original
-via rename. A database opened from a KDBX3 file is written back as KDBX4
+file is backed up to `<name>.kdbx.bak`, and the new file replaces the original
+via rename (each written to a fresh file first, so a symlink in the way is
+replaced, never written through). A vault opened through a symlink is saved
+to the link's target. If another program changed the file since keetui
+opened or last saved it, keetui asks before overwriting those changes. A database opened from a KDBX3 file is written back as KDBX4
 (KeePassXC-compatible) with the same Argon2d settings as new databases, after
 a one-time confirmation.
 
