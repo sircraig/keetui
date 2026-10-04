@@ -1,6 +1,7 @@
 //! Vault: wrapper around the keepass crate's `Database` handling unlock,
 //! atomic save with backup, and search.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -225,25 +226,36 @@ impl Vault {
     pub fn search(&self, query: &str) -> Vec<EntryId> {
         let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         let bin = self.db.recycle_bin().map(|g| g.id());
+        // Per group, worked out once rather than for each of its entries:
+        // its lowercased path, or None if it is in the recycle bin.
+        let mut groups: HashMap<GroupId, Option<String>> = HashMap::new();
         let mut hits: Vec<(String, EntryId)> = self
             .db
             .iter_all_entries()
-            .filter(|e| bin.is_none_or(|bin| !self.group_in(e.parent().id(), bin)))
             .filter(|e| {
+                let parent = e.parent().id();
+                let path = groups.entry(parent).or_insert_with(|| {
+                    let binned = bin.is_some_and(|bin| self.group_in(parent, bin));
+                    (!binned).then(|| self.group_path(parent).to_lowercase())
+                });
+                let Some(path) = path else {
+                    return false;
+                };
                 let haystack = [
                     e.get_title(),
                     e.get_username(),
                     e.get_url(),
                     e.get(fields::NOTES),
                     Some(e.tags.join(" ").as_str()),
-                    Some(self.group_path(e.parent().id()).as_str()),
                 ]
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>()
                 .join("\n")
                 .to_lowercase();
-                terms.iter().all(|t| haystack.contains(t.as_str()))
+                terms
+                    .iter()
+                    .all(|t| haystack.contains(t.as_str()) || path.contains(t.as_str()))
             })
             .map(|e| (e.get_title().unwrap_or("").to_lowercase(), e.id()))
             .collect();
@@ -514,6 +526,61 @@ mod tests {
             vault.db.config.version = version;
             assert_eq!(vault.format_needing_conversion(), Some(name));
         }
+    }
+
+    #[test]
+    fn search_matches_every_term_anywhere_but_the_recycle_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = cheap_vault(&dir.path().join("v.kdbx"));
+        let db = &mut vault.db;
+        let (work, bin) = {
+            let mut root = db.root_mut();
+            let mut work = root.add_group();
+            work.name = "Work".into();
+            let work = work.id();
+            let mut bin = root.add_group();
+            bin.name = "Recycle Bin".into();
+            (work, bin.id())
+        };
+        db.meta.recyclebin_uuid = Some(bin.uuid());
+        let mut add =
+            |group: GroupId, title: &str, user: &str, url: &str, notes: &str, tags: &[&str]| {
+                let mut g = db.group_mut(group).unwrap();
+                g.add_entry().edit(|e| {
+                    e.set_unprotected(fields::TITLE, title);
+                    e.set_unprotected(fields::USERNAME, user);
+                    e.set_unprotected(fields::URL, url);
+                    e.set_unprotected(fields::NOTES, notes);
+                    e.tags = tags.iter().map(|t| t.to_string()).collect();
+                });
+            };
+        add(work, "GitHub", "alice", "https://github.com", "", &["dev"]);
+        add(
+            work,
+            "bank",
+            "Alice",
+            "https://bank.example",
+            "PIN in safe",
+            &[],
+        );
+        add(bin, "Old GitHub", "alice", "", "", &[]);
+        let titles = |vault: &Vault, q: &str| -> Vec<String> {
+            vault
+                .search(q)
+                .into_iter()
+                .map(|id| vault.db.entry(id).unwrap().get_title().unwrap().to_string())
+                .collect()
+        };
+        // Case-insensitive, every term must match, sorted by title.
+        assert_eq!(titles(&vault, "ALICE"), ["bank", "GitHub"]);
+        assert_eq!(titles(&vault, "alice dev"), ["GitHub"]);
+        // Notes, URL, tags and the group path all count.
+        assert_eq!(titles(&vault, "pin"), ["bank"]);
+        assert_eq!(titles(&vault, "example"), ["bank"]);
+        assert_eq!(titles(&vault, "work github"), ["GitHub"]);
+        // The recycle bin is excluded.
+        assert!(titles(&vault, "old").is_empty());
+        assert!(titles(&vault, "nothing-matches").is_empty());
     }
 
     #[test]

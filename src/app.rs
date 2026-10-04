@@ -1182,7 +1182,8 @@ impl App {
         if let Some(q) = &mut self.search {
             f(q);
         }
-        self.rebuild();
+        // The group tree can't have changed; don't re-flatten it.
+        self.rebuild_entries();
     }
 
     fn cancel_search(&mut self) {
@@ -2010,7 +2011,6 @@ impl App {
     /// Rebuild the flattened group tree and the entry list from the database.
     /// Selections are kept by ID where possible.
     pub fn rebuild(&mut self) {
-        let prev_entry = self.sel_entry;
         let Some(v) = &self.vault else { return };
 
         let mut rows = Vec::new();
@@ -2035,7 +2035,13 @@ impl App {
         {
             self.sel_group = self.group_rows.first().map(|(g, _)| *g);
         }
+        self.rebuild_entries();
+    }
 
+    /// Rebuild just the entry list: enough when only the search changed.
+    fn rebuild_entries(&mut self) {
+        let prev_entry = self.sel_entry;
+        let Some(v) = &self.vault else { return };
         self.entry_rows = match self.search.as_deref() {
             Some(q) if !q.trim().is_empty() => v.search(q),
             _ => {
