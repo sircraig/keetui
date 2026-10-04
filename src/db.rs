@@ -4,6 +4,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use keepass::{
@@ -23,6 +24,30 @@ pub struct Vault {
     /// The (encrypted) file contents as last read or written, to notice when
     /// another program changes the file underneath us.
     on_disk: Vec<u8>,
+}
+
+/// Saves in progress. A termination signal waits for them to finish
+/// rather than cutting a save short.
+static SAVES_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn saving() -> bool {
+    SAVES_IN_PROGRESS.load(Ordering::SeqCst) > 0
+}
+
+/// Counts a save as in progress for as long as it lives.
+struct SaveInProgress;
+
+impl SaveInProgress {
+    fn start() -> Self {
+        SAVES_IN_PROGRESS.fetch_add(1, Ordering::SeqCst);
+        SaveInProgress
+    }
+}
+
+impl Drop for SaveInProgress {
+    fn drop(&mut self) {
+        SAVES_IN_PROGRESS.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Saving would overwrite changes another program (KeePassXC, a sync
@@ -111,6 +136,7 @@ impl Vault {
     }
 
     fn write(&mut self, overwrite: bool) -> Result<()> {
+        let _saving = SaveInProgress::start();
         if self.needs_kdbx4_upgrade() {
             // The crate can only write KDBX4; adopt keetui's config for new files.
             self.db.config = new_db_config();
@@ -393,6 +419,14 @@ mod tests {
         assert!(meta.file_type().is_file());
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read(&bak).unwrap(), before);
+    }
+
+    #[test]
+    fn a_save_counts_as_in_progress() {
+        // Other tests save concurrently, so only this side is checkable.
+        let save = SaveInProgress::start();
+        assert!(saving());
+        drop(save);
     }
 
     #[test]
