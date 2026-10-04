@@ -78,9 +78,9 @@ fn draw_confirm(frame: &mut Frame, app: &App, cs: &ConfirmState) {
                 btn("n", "keep editing", ch('n')),
             ]
         }
-        PendingAction::ConvertKdbx3 { .. } => {
+        PendingAction::ConvertFormat { .. } => {
             vec![
-                btn("y", "save as KDBX4", ch('y')),
+                btn("y", "save as KDBX 4.1", ch('y')),
                 btn("n", "cancel", ch('n')),
             ]
         }

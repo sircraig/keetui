@@ -4,12 +4,13 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use keepass::{
     Database, DatabaseKey,
     config::{DatabaseConfig, DatabaseVersion, KdfConfig},
-    db::{DatabaseOpenError, EntryId, GroupId, fields},
+    db::{DatabaseOpenError, Entry, EntryId, GroupId, History, fields},
 };
 use zeroize::Zeroizing;
 
@@ -23,6 +24,30 @@ pub struct Vault {
     /// The (encrypted) file contents as last read or written, to notice when
     /// another program changes the file underneath us.
     on_disk: Vec<u8>,
+}
+
+/// Saves in progress. A termination signal waits for them to finish
+/// rather than cutting a save short.
+static SAVES_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn saving() -> bool {
+    SAVES_IN_PROGRESS.load(Ordering::SeqCst) > 0
+}
+
+/// Counts a save as in progress for as long as it lives.
+struct SaveInProgress;
+
+impl SaveInProgress {
+    fn start() -> Self {
+        SAVES_IN_PROGRESS.fetch_add(1, Ordering::SeqCst);
+        SaveInProgress
+    }
+}
+
+impl Drop for SaveInProgress {
+    fn drop(&mut self) {
+        SAVES_IN_PROGRESS.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Saving would overwrite changes another program (KeePassXC, a sync
@@ -93,9 +118,54 @@ impl Vault {
         Ok(build_key(password, keyfile)? == self.key)
     }
 
-    /// The database was opened from a pre-KDBX4 file and will be converted on save.
-    pub fn needs_kdbx4_upgrade(&self) -> bool {
-        !matches!(self.db.config.version, DatabaseVersion::KDB4(_))
+    /// Trim an entry's history to the vault's limits, keeping the newest
+    /// versions, as KeePass and KeePassXC do after every edit (keepass-rs
+    /// never does). A negative limit means unlimited. The size is
+    /// approximate: keepass-rs keeps attachments in a shared pool, so only
+    /// text counts.
+    pub fn prune_history(&mut self, id: EntryId) {
+        let limit = |value: Option<isize>, default| {
+            usize::try_from(value.unwrap_or(default)).unwrap_or(usize::MAX)
+        };
+        let max_items = limit(self.db.meta.history_max_items, DEFAULT_HISTORY_MAX_ITEMS);
+        let max_size = limit(self.db.meta.history_max_size, DEFAULT_HISTORY_MAX_SIZE);
+        let Some(mut e) = self.db.entry_mut(id) else {
+            return;
+        };
+        let Some(history) = e.history.take() else {
+            return;
+        };
+        let mut size = 0;
+        let kept: Vec<Entry> = history
+            .get_entries()
+            .iter()
+            .take(max_items)
+            .take_while(|old| {
+                size += approximate_size(old);
+                size <= max_size
+            })
+            .cloned()
+            .collect();
+        // add_entry puts each version first, so add the oldest first.
+        let mut pruned = History::default();
+        for old in kept.into_iter().rev() {
+            pruned.add_entry(old);
+        }
+        e.history = Some(pruned);
+    }
+
+    /// The database's format, if keepass-rs can't write it: it only writes
+    /// KDBX 4.1, so anything else is converted when saved.
+    pub fn format_needing_conversion(&self) -> Option<&'static str> {
+        match self.db.config.version {
+            DatabaseVersion::KDB4(1) => None,
+            DatabaseVersion::KDB4(0) => Some("KDBX 4.0"),
+            DatabaseVersion::KDB4(_) => Some("a newer KDBX 4"),
+            DatabaseVersion::KDB3(0) => Some("KDBX 3.0"),
+            DatabaseVersion::KDB3(_) => Some("KDBX 3.1"),
+            DatabaseVersion::KDB2(_) => Some("a KeePass 2 pre-release format"),
+            DatabaseVersion::KDB(_) => Some("KeePass 1.x (.kdb)"),
+        }
     }
 
     /// Serialize, verify, back up the old file, then atomically replace it.
@@ -111,9 +181,14 @@ impl Vault {
     }
 
     fn write(&mut self, overwrite: bool) -> Result<()> {
-        if self.needs_kdbx4_upgrade() {
-            // The crate can only write KDBX4; adopt keetui's config for new files.
-            self.db.config = new_db_config();
+        let _saving = SaveInProgress::start();
+        // keepass-rs only writes KDBX 4.1. A KDBX 4 file keeps its own
+        // encryption settings (4.1 supports all of them); older formats get
+        // keetui's settings for new files.
+        match self.db.config.version {
+            DatabaseVersion::KDB4(1) => {}
+            DatabaseVersion::KDB4(_) => self.db.config.version = DatabaseVersion::KDB4(1),
+            _ => self.db.config = new_db_config(),
         }
 
         let mut buf = Vec::new();
@@ -258,6 +333,20 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// KeePass's history limits for vaults that don't set their own.
+const DEFAULT_HISTORY_MAX_ITEMS: isize = 10;
+const DEFAULT_HISTORY_MAX_SIZE: isize = 6 * 1024 * 1024;
+
+/// Roughly how much text an entry holds: field names and values, and tags.
+fn approximate_size(entry: &Entry) -> usize {
+    let fields: usize = entry
+        .fields
+        .iter()
+        .map(|(key, value)| key.len() + value.get().len())
+        .sum();
+    fields + entry.tags.iter().map(String::len).sum::<usize>()
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -393,6 +482,46 @@ mod tests {
         assert!(meta.file_type().is_file());
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read(&bak).unwrap(), before);
+    }
+
+    #[test]
+    fn saves_kdbx_4_0_as_4_1_keeping_its_settings() {
+        // KeePassXC writes KDBX 4.0 when no 4.1 feature is in use; such a
+        // file opens as KDB4(0), which keepass-rs can't write.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.kdbx");
+        let mut vault = cheap_vault(&path);
+        vault.db.config.version = DatabaseVersion::KDB4(0);
+        let settings = vault.db.config.kdf_config.clone();
+        assert_eq!(vault.format_needing_conversion(), Some("KDBX 4.0"));
+
+        vault.save().unwrap();
+        let reopened = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(reopened.db.config.version, DatabaseVersion::KDB4(1));
+        assert_eq!(reopened.db.config.kdf_config, settings, "kept its own KDF");
+        assert_eq!(reopened.format_needing_conversion(), None);
+    }
+
+    #[test]
+    fn names_the_format_being_converted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = cheap_vault(&dir.path().join("v.kdbx"));
+        for (version, name) in [
+            (DatabaseVersion::KDB(1), "KeePass 1.x (.kdb)"),
+            (DatabaseVersion::KDB3(1), "KDBX 3.1"),
+            (DatabaseVersion::KDB4(0), "KDBX 4.0"),
+        ] {
+            vault.db.config.version = version;
+            assert_eq!(vault.format_needing_conversion(), Some(name));
+        }
+    }
+
+    #[test]
+    fn a_save_counts_as_in_progress() {
+        // Other tests save concurrently, so only this side is checkable.
+        let save = SaveInProgress::start();
+        assert!(saving());
+        drop(save);
     }
 
     #[test]

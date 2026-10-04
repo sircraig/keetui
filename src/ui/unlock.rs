@@ -215,11 +215,6 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
         },
     );
 
-    let back = if app.db_path.is_file() {
-        "back"
-    } else {
-        "quit"
-    };
     buttons(
         frame,
         app,
@@ -227,13 +222,20 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
         inner.bottom() - 1,
         inner.right(),
         vec![
-            btn("⏎", "create", key(KeyCode::Enter, KeyModifiers::NONE)),
+            // Ctrl-s creates from any field (Enter only on the last ones).
+            btn(
+                "^s",
+                "create",
+                key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ),
             btn(
                 "^r",
                 if st.reveal { "hide" } else { "show" },
                 key(KeyCode::Char('r'), KeyModifiers::CONTROL),
             ),
-            btn("esc", back, key(KeyCode::Esc, KeyModifiers::NONE)),
+            // Esc always goes back: to the unlock screen when there is a
+            // database to unlock, otherwise to the file picker.
+            btn("esc", "back", key(KeyCode::Esc, KeyModifiers::NONE)),
         ],
     );
     hint(frame, inner, "tab next field");

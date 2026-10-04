@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use keepass::db::{EntryId, GroupId, fields};
+use keepass::db::{EntryId, GroupId, Times, Value, fields};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -218,6 +218,17 @@ impl CreateState {
         (!kf.is_empty()).then(|| expand_home(kf))
     }
 
+    /// Validate the form and, if it's fine, schedule the creation.
+    fn submit(&mut self) {
+        match self.validate() {
+            Ok(()) => {
+                self.error = None;
+                self.working = true;
+            }
+            Err(msg) => self.error = Some(msg),
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         let raw = self.fields[C_PATH].text.trim();
         if raw.is_empty() {
@@ -291,6 +302,15 @@ pub const F_OTP: usize = 4;
 pub const F_NOTES: usize = 5;
 pub const ENTRY_FIELD_LABELS: [&str; 6] = ["Title", "Username", "Password", "URL", "OTP", "Notes"];
 
+/// What saving the entry form does to the OTP field.
+enum OtpChange {
+    /// Untouched: keep the stored value exactly as it is, even if keetui
+    /// can't use it (it may be a format another client understands).
+    Keep,
+    Remove,
+    Set(Zeroizing<String>),
+}
+
 pub struct EntryForm {
     pub target: Option<EntryId>, // None = new entry
     pub group: GroupId,
@@ -339,7 +359,8 @@ pub enum PendingAction {
     DeleteEntry(EntryId),
     DeleteGroup(GroupId),
     DiscardForm,
-    ConvertKdbx3 {
+    /// Save a database in a format keepass-rs can't write as KDBX 4.1.
+    ConvertFormat {
         then_quit: bool,
     },
     /// Save over changes another program made to the file.
@@ -408,7 +429,8 @@ pub struct App {
     keyfile_arg: String,
     pub should_quit: bool,
     pub dirty: bool,
-    kdbx3_ack: bool,
+    /// The user agreed to save this database in another format.
+    convert_ack: bool,
 
     pub pane: Pane,
     pub expanded: HashSet<GroupId>,
@@ -440,6 +462,9 @@ pub struct App {
     pub group_offset: Cell<usize>,
     pub entry_offset: Cell<usize>,
     pub page_rows: Cell<usize>,
+    /// The last frame was too small to show the UI; input is ignored until
+    /// it fits again, so keys can't act on forms that aren't drawn.
+    pub too_small: Cell<bool>,
 }
 
 impl App {
@@ -468,7 +493,7 @@ impl App {
             keyfile_arg: keyfile_text,
             should_quit: false,
             dirty: false,
-            kdbx3_ack: false,
+            convert_ack: false,
             pane: Pane::Groups,
             expanded: HashSet::new(),
             sel_group: None,
@@ -490,6 +515,7 @@ impl App {
             group_offset: Cell::new(0),
             entry_offset: Cell::new(0),
             page_rows: Cell::new(10),
+            too_small: Cell::new(false),
         }
     }
 
@@ -521,6 +547,15 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.last_input = Instant::now();
+        if self.too_small.get() {
+            // Only quitting, and only when nothing would be lost.
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if ctrl_c && !self.has_unsaved_work() {
+                self.should_quit = true;
+            }
+            return;
+        }
         if key.code == KeyCode::Char('l')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && self.is_unlocked()
@@ -548,7 +583,7 @@ impl App {
     /// as commands.) Only the notes field keeps line breaks.
     pub fn on_paste(&mut self, text: &str) {
         self.last_input = Instant::now();
-        if self.overlay.is_some() {
+        if self.overlay.is_some() || self.too_small.get() {
             return;
         }
         // A paste may well be a password: build what gets inserted in a
@@ -605,6 +640,9 @@ impl App {
         self.mouse = Some(pos);
         if ev.kind != MouseEventKind::Moved {
             self.last_input = Instant::now();
+        }
+        if self.too_small.get() {
+            return;
         }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -969,14 +1007,11 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Down => st.focus = (st.focus + 1) % 4,
             KeyCode::BackTab | KeyCode::Up => st.focus = (st.focus + 3) % 4,
+            // Enter moves on to the next field until there's nothing left to
+            // fill in; Ctrl-s (and the create button) creates from any field.
             KeyCode::Enter if st.focus < C_CONFIRM => st.focus += 1,
-            KeyCode::Enter => match st.validate() {
-                Ok(()) => {
-                    st.error = None;
-                    st.working = true;
-                }
-                Err(msg) => st.error = Some(msg),
-            },
+            KeyCode::Enter => st.submit(),
+            KeyCode::Char('s') if ctrl => st.submit(),
             _ => {
                 if edit_field(&mut st.fields[st.focus], key) {
                     st.error = None;
@@ -1457,29 +1492,52 @@ impl App {
         }
     }
 
+    /// Work out what saving `form` does to the OTP field. Only a value the
+    /// user typed is normalized and validated; settings that can't produce
+    /// codes are refused then, rather than failing later.
+    fn otp_change(&self, form: &EntryForm) -> Result<OtpChange, String> {
+        let text = form.fields[F_OTP].text.as_str();
+        let unchanged = form
+            .target
+            .and_then(|id| self.vault.as_ref()?.db.entry(id))
+            .map_or(text.is_empty(), |e| {
+                e.get_raw_otp_value().unwrap_or("") == text
+            });
+        if unchanged {
+            return Ok(OtpChange::Keep);
+        }
+        if text.trim().is_empty() {
+            return Ok(OtpChange::Remove);
+        }
+        let otp = totp::normalize_otp(text, &form.fields[F_TITLE].text);
+        totp::parse(&otp)?;
+        Ok(OtpChange::Set(otp))
+    }
+
     fn commit_entry_form(&mut self) {
-        // OTP settings that can't produce codes would only fail later (or,
-        // before validation existed, crash the detail pane): keep the form
-        // open on the OTP field instead.
-        let otp_error = match &self.screen {
-            Screen::EntryEdit(form) => {
-                let raw = form.fields[F_OTP].text.trim();
-                (!raw.is_empty())
-                    .then(|| {
-                        let otp = totp::normalize_otp(raw, &form.fields[F_TITLE].text);
-                        totp::parse(&otp).err()
-                    })
-                    .flatten()
-            }
-            _ => None,
-        };
-        if let Some(msg) = otp_error {
-            if let Screen::EntryEdit(form) = &mut self.screen {
-                form.focus = F_OTP;
-            }
-            self.set_error(msg);
+        // An existing entry that wasn't changed: just close the editor. A
+        // commit would add a history item, bump the modification time (which
+        // can make it win a merge against a real edit elsewhere) and mark
+        // the vault unsaved.
+        if matches!(&self.screen, Screen::EntryEdit(f) if f.target.is_some() && !f.modified) {
+            self.screen = Screen::Browser;
             return;
         }
+        let otp = match &self.screen {
+            Screen::EntryEdit(form) => self.otp_change(form),
+            _ => return,
+        };
+        let otp = match otp {
+            Ok(otp) => otp,
+            Err(msg) => {
+                // Keep the form open on the OTP field.
+                if let Screen::EntryEdit(form) = &mut self.screen {
+                    form.focus = F_OTP;
+                }
+                self.set_error(msg);
+                return;
+            }
+        };
 
         let Screen::EntryEdit(form) = mem::replace(&mut self.screen, Screen::Browser) else {
             return;
@@ -1490,9 +1548,40 @@ impl App {
         let username = form.fields[F_USER].text.to_string();
         let password = Zeroizing::new(form.fields[F_PASS].text.to_string());
         let url = form.fields[F_URL].text.to_string();
-        let otp_raw = Zeroizing::new(form.fields[F_OTP].text.trim().to_string());
         let notes = form.fields[F_NOTES].text.to_string();
-        let otp = (!otp_raw.is_empty()).then(|| totp::normalize_otp(&otp_raw, &title));
+
+        // Keep each field's protection, and add what the vault's memory
+        // protection settings ask for: writing a field unprotected would drop
+        // it quietly (keepass-rs doesn't re-apply the settings on save).
+        let settings = v.db.meta.memory_protection.clone().unwrap_or_default();
+        let existing = form.target.and_then(|id| v.db.entry(id));
+        let value = |key: &str, text: &str, by_setting: bool| {
+            let had_it = existing
+                .as_ref()
+                .and_then(|e| e.fields.get(key))
+                .is_some_and(|value| value.is_protected());
+            if by_setting || had_it {
+                Value::protected(text)
+            } else {
+                Value::unprotected(text)
+            }
+        };
+        let updates = [
+            (
+                fields::TITLE,
+                value(fields::TITLE, &title, settings.protect_title),
+            ),
+            (
+                fields::USERNAME,
+                value(fields::USERNAME, &username, settings.protect_username),
+            ),
+            (fields::PASSWORD, Value::protected(password.as_str())),
+            (fields::URL, value(fields::URL, &url, settings.protect_url)),
+            (
+                fields::NOTES,
+                value(fields::NOTES, &notes, settings.protect_notes),
+            ),
+        ];
 
         let id = match form.target {
             Some(id) => Some(id),
@@ -1510,33 +1599,35 @@ impl App {
         if form.target.is_some() {
             // Record the previous state in entry history, like KeePassXC does.
             e.edit_tracking(|e| {
-                e.set_unprotected(fields::TITLE, &title);
-                e.set_unprotected(fields::USERNAME, &username);
-                e.set_protected(fields::PASSWORD, password.as_str());
-                e.set_unprotected(fields::URL, &url);
-                e.set_unprotected(fields::NOTES, &notes);
-                if let Some(otp) = &otp {
-                    e.set_protected(fields::OTP, otp.as_str());
+                for (key, value) in updates {
+                    e.set(key, value);
+                }
+                match &otp {
+                    OtpChange::Keep => {}
+                    OtpChange::Remove => {
+                        e.fields.remove(fields::OTP);
+                    }
+                    OtpChange::Set(otp) => e.set_protected(fields::OTP, otp.as_str()),
                 }
             });
         } else {
             e.edit(|e| {
-                e.set_unprotected(fields::TITLE, &title);
-                e.set_unprotected(fields::USERNAME, &username);
-                e.set_protected(fields::PASSWORD, password.as_str());
-                e.set_unprotected(fields::URL, &url);
-                e.set_unprotected(fields::NOTES, &notes);
-                if let Some(otp) = &otp {
+                for (key, value) in updates {
+                    e.set(key, value);
+                }
+                if let OtpChange::Set(otp) = &otp {
                     e.set_protected(fields::OTP, otp.as_str());
                 }
             });
         }
-        if otp.is_none() {
-            e.fields.remove(fields::OTP);
+        if form.target.is_some() {
+            v.prune_history(id);
         }
 
         self.dirty = true;
-        self.sel_entry = Some(id);
+        // Through select_entry, which hides a password revealed for the
+        // previously selected entry.
+        self.select_entry(id);
         self.pane = Pane::Entries;
         self.rebuild();
         let verb = if form.target.is_some() {
@@ -1593,7 +1684,8 @@ impl App {
             match form.target {
                 Some(id) => {
                     if let Some(mut g) = v.db.group_mut(id) {
-                        g.name = name;
+                        // Tracked, so merges see when it was renamed.
+                        g.edit_tracking(|g| g.name = name);
                     }
                 }
                 None => match v.db.group_mut(form.parent) {
@@ -1699,12 +1791,19 @@ impl App {
                 return;
             };
             match to_bin {
+                // Not the tracked move, which would also add a history item.
+                // Merges need the new location's timestamp.
                 Some(bin) => e
                     .move_to(bin)
-                    .map(|_| "entry moved to recycle bin")
+                    .map(|_| {
+                        e.times.location_changed = Some(Times::now());
+                        "entry moved to recycle bin"
+                    })
                     .map_err(|_| "failed to move entry to recycle bin"),
                 None => {
-                    e.remove();
+                    // Tracked, so the deletion is recorded in DeletedObjects
+                    // and a sync with an older copy doesn't bring it back.
+                    e.track_changes().remove();
                     Ok("entry deleted")
                 }
             }
@@ -1725,14 +1824,18 @@ impl App {
                 return;
             };
             match to_bin {
+                // Tracked, so merges see when it moved.
                 Some(bin) => g
+                    .track_changes()
                     .move_to(bin)
                     .map(|_| "group moved to recycle bin")
                     .map_err(|_| "failed to move group to recycle bin"),
-                None => {
-                    g.remove();
-                    Ok("group deleted")
-                }
+                // Tracked: records the group and everything in it as deleted.
+                None => g
+                    .track_changes()
+                    .remove()
+                    .map(|_| "group deleted")
+                    .map_err(|_| "the root group cannot be deleted"),
             }
         };
         if self.sel_group == Some(id) {
@@ -1750,11 +1853,15 @@ impl App {
 
     fn save_flow(&mut self, then_quit: bool) {
         let Some(v) = &self.vault else { return };
-        if v.needs_kdbx4_upgrade() && !self.kdbx3_ack {
+        if let Some(format) = v.format_needing_conversion()
+            && !self.convert_ack
+        {
             self.overlay = Some(Overlay::Confirm(ConfirmState {
-                prompt: "This database is KDBX3; keetui saves as KDBX4 (KeePassXC-compatible). Continue?"
-                    .into(),
-                pending: PendingAction::ConvertKdbx3 { then_quit },
+                prompt: format!(
+                    "This database is {format}, which keetui can't write. Save it as \
+                     KDBX 4.1 (needs KeePassXC 2.7+ or KeePass 2.48+)?"
+                ),
+                pending: PendingAction::ConvertFormat { then_quit },
             }));
             return;
         }
@@ -1892,8 +1999,8 @@ impl App {
             PendingAction::DeleteEntry(id) => self.delete_entry(id),
             PendingAction::DeleteGroup(id) => self.delete_group(id),
             PendingAction::DiscardForm => self.screen = Screen::Browser,
-            PendingAction::ConvertKdbx3 { then_quit } => {
-                self.kdbx3_ack = true;
+            PendingAction::ConvertFormat { then_quit } => {
+                self.convert_ack = true;
                 self.do_save(then_quit, false);
             }
             PendingAction::OverwriteExternal { then_quit } => self.do_save(then_quit, true),
@@ -2335,6 +2442,22 @@ mod tests {
     }
 
     #[test]
+    fn editor_errors_stay_visible_on_a_24_row_terminal() {
+        let (_dir, mut app) = unlocked(|_| {});
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_OTP].set_text("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0");
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.screen, Screen::EntryEdit(_)), "save refused");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        assert!(screen_text(&terminal).contains("invalid OTP period"));
+    }
+
+    #[test]
     fn editor_masks_the_totp_secret() {
         let (_dir, mut app) = unlocked(|db| {
             db.root_mut().add_entry().edit(|e| {
@@ -2363,6 +2486,506 @@ mod tests {
         app.revealed_at = Instant::now().checked_sub(REVEAL_TTL).unwrap();
         app.on_tick();
         assert!(!app.reveal);
+    }
+
+    #[test]
+    fn saving_an_entry_leaves_an_untouched_otp_field_alone() {
+        // KeeOTP format (KeePass + KeeOtp; KeePassXC reads it) and a lowercase
+        // base32 secret (KeePassXC accepts it).
+        let mut failures = Vec::new();
+        for stored in [
+            "key=JBSWY3DPEHPK3PXP&size=8&step=60",
+            "otpauth://totp/x?secret=jbswy3dpehpk3pxp",
+        ] {
+            let (_dir, mut app) = unlocked(|db| {
+                db.root_mut().add_entry().edit(|e| {
+                    e.set_unprotected(fields::TITLE, "Site");
+                    e.set_protected(fields::OTP, stored);
+                });
+            });
+            app.on_key(key(KeyCode::Tab));
+            app.on_key(key(KeyCode::Char('e')));
+            let Screen::EntryEdit(form) = &mut app.screen else {
+                panic!("expected the entry editor");
+            };
+            // Change only the password.
+            form.focus = F_PASS;
+            app.on_key(key(KeyCode::Char('x')));
+            app.on_key(ctrl('s'));
+            if !matches!(app.screen, Screen::Browser) {
+                failures.push(format!("{stored}: saving the entry was refused"));
+                continue;
+            }
+            let v = app.vault.as_ref().unwrap();
+            let e = v.db.entry(app.sel_entry.unwrap()).unwrap();
+            if e.get_raw_otp_value() != Some(stored) {
+                failures.push(format!(
+                    "{stored}: rewritten to {:?}",
+                    e.get_raw_otp_value()
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn permanent_deletes_are_recorded_as_deleted_objects() {
+        // Without these records, syncing with an older copy of the vault
+        // (KeePass, Keepass2Android, keepass-rs merge) brings them back.
+        let (_dir, mut app) = unlocked(|db| {
+            db.root_mut()
+                .add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "OldBank"));
+            let mut root = db.root_mut();
+            let mut work = root.add_group();
+            work.name = "Work".into();
+            work.add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "Inside"));
+        });
+        let ids = {
+            let db = &app.vault.as_ref().unwrap().db;
+            assert!(db.recycle_bin().is_none(), "deletes must be permanent here");
+            let root = db.root();
+            let work = root.group_by_name("Work").unwrap();
+            [
+                root.entry_by_name("OldBank").unwrap().id().uuid(),
+                work.id().uuid(),
+                work.entry_by_name("Inside").unwrap().id().uuid(),
+            ]
+        };
+
+        // Delete OldBank from the entries pane, then the Work group.
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        let deleted = |app: &App| {
+            let db = &app.vault.as_ref().unwrap().db;
+            ids.map(|id| db.deleted_objects.contains_key(&id))
+        };
+        assert_eq!(deleted(&app), [true; 3]);
+
+        // And they survive a save.
+        app.on_key(ctrl('s'));
+        let path = app.vault.as_ref().unwrap().path.clone();
+        app.vault = Some(Vault::open(&path, "pw", None).unwrap());
+        assert_eq!(deleted(&app), [true; 3]);
+    }
+
+    /// Change the selected entry's password through the editor.
+    fn change_password(app: &mut App, password: &str) {
+        app.open_entry_editor(app.sel_entry);
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_PASS].set_text(password);
+        form.modified = true;
+        app.on_key(ctrl('s'));
+        assert!(matches!(app.screen, Screen::Browser), "saving failed");
+    }
+
+    fn history_passwords(app: &App) -> Vec<String> {
+        let v = app.vault.as_ref().unwrap();
+        let e = v.db.entry(app.sel_entry.unwrap()).unwrap();
+        let history = e.history.as_ref().map(|h| h.get_entries().as_slice());
+        history
+            .unwrap_or_default()
+            .iter()
+            .map(|h| h.get_password().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn edits_keep_history_within_the_vaults_limits() {
+        let vault_with = |max_items: Option<isize>, max_size: Option<isize>| {
+            unlocked(move |db| {
+                db.meta.history_max_items = max_items;
+                db.meta.history_max_size = max_size;
+                db.root_mut().add_entry().edit(|e| {
+                    e.set_unprotected(fields::TITLE, "Site");
+                    e.set_protected(fields::PASSWORD, "old-secret");
+                });
+            })
+        };
+
+        let (_dir, mut app) = vault_with(Some(2), Some(-1));
+        for password in ["new-1", "new-2", "new-3"] {
+            change_password(&mut app, password);
+        }
+        assert_eq!(history_passwords(&app), ["new-2", "new-1"], "newest first");
+
+        // No history at all, by count or by size.
+        for (items, size) in [(Some(0), Some(-1)), (Some(-1), Some(0))] {
+            let (_dir, mut app) = vault_with(items, size);
+            change_password(&mut app, "new-1");
+            assert!(history_passwords(&app).is_empty(), "{items:?} {size:?}");
+        }
+
+        // -1 means unlimited.
+        let (_dir, mut app) = vault_with(Some(-1), Some(-1));
+        for password in ["new-1", "new-2", "new-3"] {
+            change_password(&mut app, password);
+        }
+        assert_eq!(history_passwords(&app).len(), 3);
+    }
+
+    #[test]
+    fn moves_and_renames_update_their_timestamps() {
+        // Merges (KeePass, KeePassXC, keepass-rs) decide which side of a
+        // change wins by these timestamps.
+        let old = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let (_dir, mut app) = unlocked(move |db| {
+            let bin = {
+                let mut root = db.root_mut();
+                let mut bin = root.add_group();
+                bin.name = "Recycle Bin".into();
+                bin.id()
+            };
+            db.meta.recyclebin_enabled = Some(true);
+            db.meta.recyclebin_uuid = Some(bin.uuid());
+            db.root_mut().add_entry().edit(|e| {
+                e.set_unprotected(fields::TITLE, "E1");
+                e.times.location_changed = Some(old);
+            });
+            for name in ["G3", "G4"] {
+                let mut root = db.root_mut();
+                let mut group = root.add_group();
+                group.name = name.into();
+                group.times.location_changed = Some(old);
+                group.times.last_modification = Some(old);
+            }
+        });
+        let (e1, g3, g4) = {
+            let root = app.vault.as_ref().unwrap().db.root();
+            (
+                root.entry_by_name("E1").unwrap().id(),
+                root.group_by_name("G3").unwrap().id(),
+                root.group_by_name("G4").unwrap().id(),
+            )
+        };
+
+        // E1 to the recycle bin; rename G3; G4 to the recycle bin.
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        app.on_key(key(KeyCode::Tab));
+        app.select_group(g3);
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(ctrl('u'));
+        for c in "G3b".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        app.select_group(g4);
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+
+        let db = &app.vault.as_ref().unwrap().db;
+        let bin = db.recycle_bin().unwrap().id();
+        assert_eq!(db.entry(e1).unwrap().parent().id(), bin, "E1 moved");
+        assert_eq!(db.group(g3).unwrap().name, "G3b", "G3 renamed");
+        let mut stale = Vec::new();
+        if db.entry(e1).unwrap().times.location_changed == Some(old) {
+            stale.push("E1 location_changed");
+        }
+        if db.group(g3).unwrap().times.last_modification == Some(old) {
+            stale.push("G3 last_modification");
+        }
+        if db.group(g4).unwrap().times.location_changed == Some(old) {
+            stale.push("G4 location_changed");
+        }
+        assert!(stale.is_empty(), "not updated: {stale:?}");
+    }
+
+    #[test]
+    fn detail_pane_hints_only_keys_that_act_on_the_entry() {
+        let (_dir, mut app) = unlocked(|db| {
+            let mut root = db.root_mut();
+            let mut work = root.add_group();
+            work.name = "Work".into();
+            work.add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "GitHub"));
+        });
+        // Browsing groups: Work selected, its entry GitHub in the detail pane.
+        let work = app
+            .vault
+            .as_ref()
+            .unwrap()
+            .db
+            .root()
+            .group_by_name("Work")
+            .unwrap()
+            .id();
+        app.select_group(work);
+        assert!(app.pane == Pane::Groups);
+        let draw = |app: &App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+            screen_text(&terminal)
+        };
+        let text = draw(&app);
+        assert!(text.contains("GitHub"));
+        // Here e and d act on the group, so the entry's buttons mustn't say so.
+        assert!(
+            !text.contains("[d delete]") && !text.contains("[e edit]"),
+            "entry buttons advertise keys that act on the group"
+        );
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(matches!(&app.overlay, Some(Overlay::Confirm(cs)) if cs.prompt.contains("group")));
+        app.on_key(key(KeyCode::Char('n')));
+
+        // In the entries pane the keys do act on the entry.
+        app.on_key(key(KeyCode::Tab));
+        let text = draw(&app);
+        assert!(text.contains("[d delete]") && text.contains("[e edit]"));
+    }
+
+    #[test]
+    fn a_new_entry_starts_with_its_password_hidden() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('r')));
+        assert!(app.reveal, "Alpha-entry's password revealed");
+
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.fields[F_TITLE].set_text("Charlie");
+        form.fields[F_PASS].set_text("charlie-secret");
+        form.modified = true;
+        app.on_key(ctrl('s'));
+        let v = app.vault.as_ref().unwrap();
+        let selected = v.db.entry(app.sel_entry.unwrap()).unwrap();
+        assert_eq!(selected.get_title(), Some("Charlie"));
+        assert!(!app.reveal, "the new entry's password is shown in clear");
+    }
+
+    #[test]
+    fn saving_an_unchanged_entry_records_nothing() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        let times = |app: &App| {
+            let v = app.vault.as_ref().unwrap();
+            v.db.entry(app.sel_entry.unwrap())
+                .unwrap()
+                .times
+                .last_modification
+        };
+        let before = times(&app);
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Char('e')));
+            app.on_key(ctrl('s'));
+            assert!(matches!(app.screen, Screen::Browser), "editor closed");
+        }
+        assert!(
+            history_passwords(&app).is_empty(),
+            "no-op saves added history"
+        );
+        assert!(!app.dirty, "no-op saves marked the vault unsaved");
+        assert_eq!(times(&app), before);
+    }
+
+    #[test]
+    fn editing_keeps_field_protection() {
+        let (_dir, mut app) = unlocked(|db| {
+            // Protect user names and notes, as a vault can be set up to.
+            db.meta.memory_protection = Some(keepass::db::MemoryProtection {
+                protect_username: true,
+                protect_notes: true,
+                ..Default::default()
+            });
+            db.root_mut().add_entry().edit(|e| {
+                e.set_unprotected(fields::TITLE, "Site");
+                e.set_protected(fields::USERNAME, "alice");
+                // Protected here although the vault doesn't ask for it.
+                e.set_protected(fields::URL, "https://example.com");
+                e.set_protected(fields::NOTES, "recovery codes");
+                e.set_protected(fields::PASSWORD, "pw1");
+            });
+        });
+        let protection = |app: &App| {
+            let v = app.vault.as_ref().unwrap();
+            let e = v.db.entry(app.sel_entry.unwrap()).unwrap();
+            [fields::TITLE, fields::USERNAME, fields::URL, fields::NOTES]
+                .map(|key| e.fields.get(key).is_some_and(|v| v.is_protected()))
+        };
+
+        // Changing only the password keeps the other fields protected.
+        change_password(&mut app, "pw2");
+        assert_eq!(protection(&app), [false, true, true, true]);
+
+        // A new entry follows the vault's settings.
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        for (i, text) in [
+            (F_TITLE, "New"),
+            (F_USER, "bob"),
+            (F_URL, "x"),
+            (F_NOTES, "n"),
+        ] {
+            form.fields[i].set_text(text);
+        }
+        form.modified = true;
+        app.on_key(ctrl('s'));
+        assert_eq!(protection(&app), [false, true, false, true]);
+    }
+
+    #[test]
+    fn editor_survives_narrow_and_short_terminals() {
+        let (_dir, mut app) = unlocked(|_| {});
+        app.on_key(key(KeyCode::Char('a')));
+        let Screen::EntryEdit(form) = &mut app.screen else {
+            panic!("expected the entry editor");
+        };
+        form.focus = F_NOTES;
+        form.fields[F_NOTES].set_text("some notes\nsecond line");
+        for width in 1..=40 {
+            for height in [1, 5, 12, 20, 30] {
+                let backend = ratatui::backend::TestBackend::new(width, height);
+                let mut terminal = ratatui::Terminal::new(backend).unwrap();
+                terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+            }
+        }
+    }
+
+    fn draw_at(app: &App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        screen_text(&terminal)
+    }
+
+    #[test]
+    fn a_too_small_terminal_shows_why_and_ignores_keys() {
+        let (_dir, path) = vault_file(|_| {});
+        let mut app = App::new(Some(path), None, None);
+        // 80x12 is too short for the unlock form: it isn't drawn...
+        let text = draw_at(&app, 80, 12);
+        assert!(!text.contains("Password"));
+        // ...so typing must not go into a password field nobody can see.
+        app.on_key(key(KeyCode::Char('x')));
+        let Screen::Unlock(st) = &app.screen else {
+            panic!("expected the unlock screen");
+        };
+        assert!(st.password.text.is_empty(), "typing reached a hidden field");
+        assert!(text.contains("too small"), "the screen should say why");
+
+        // Big enough again: back to normal.
+        assert!(draw_at(&app, 80, 24).contains("Password"));
+        app.on_key(key(KeyCode::Char('x')));
+        let Screen::Unlock(st) = &app.screen else {
+            panic!("expected the unlock screen");
+        };
+        assert_eq!(st.password.text.as_str(), "x");
+    }
+
+    #[test]
+    fn a_hidden_confirmation_cannot_delete() {
+        let (_dir, mut app) = lockable();
+        app.on_key(key(KeyCode::Tab));
+        let entries = |app: &App| app.vault.as_ref().unwrap().db.num_entries();
+        let before = entries(&app);
+        // In 5 rows the confirm dialog has no room for its question.
+        draw_at(&app, 80, 5);
+        app.on_key(key(KeyCode::Char('d')));
+        draw_at(&app, 80, 5);
+        app.on_key(key(KeyCode::Char('y')));
+        assert_eq!(entries(&app), before, "deleted behind an empty dialog");
+    }
+
+    #[test]
+    fn wide_group_names_dont_cover_the_entry_buttons() {
+        let (_dir, mut app) = unlocked(|db| {
+            let mut root = db.root_mut();
+            let mut cards = root.add_group();
+            cards.name = "クレジットカード".into();
+            cards
+                .add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "Visa"));
+        });
+        let cards = {
+            let db = &app.vault.as_ref().unwrap().db;
+            db.root().group_by_name("クレジットカード").unwrap().id()
+        };
+        app.select_group(cards);
+        app.on_key(key(KeyCode::Tab));
+        assert!(draw_at(&app, 80, 24).contains("[e edit] [d delete]"));
+    }
+
+    #[test]
+    fn the_save_button_is_clickable_where_it_is_drawn() {
+        let (_dir, mut app) = lockable();
+        let v = app.vault.as_mut().unwrap();
+        v.path = v.path.with_file_name("パスワード.kdbx");
+        app.dirty = true;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let status_row = 22;
+        let marker = (0..80)
+            .find(|&x| buffer[(x, status_row)].symbol() == "●")
+            .expect("unsaved marker drawn");
+        let save = app
+            .hits
+            .borrow()
+            .iter()
+            .find_map(|(rect, hit)| matches!(hit, Hit::Act(Action::Save)).then_some(*rect));
+        assert_eq!(save.map(|r| r.x), Some(marker));
+    }
+
+    #[test]
+    fn new_database_buttons_do_what_they_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(dir.path().join("new.kdbx")), None, None);
+        let Screen::Create(st) = &mut app.screen else {
+            panic!("expected the new-database screen");
+        };
+        st.fields[C_PASS].set_text("pw");
+        st.fields[C_CONFIRM].set_text("pw");
+        assert_eq!(st.focus, C_PASS);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let text = screen_text(&terminal);
+        let mut wrong = Vec::new();
+        // Esc goes back to the file picker; it doesn't quit.
+        if text.contains("[esc quit]") {
+            wrong.push("Esc is labelled quit");
+        }
+
+        // Clicking the create button creates, whichever field has focus.
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..24)
+            .find_map(|y| {
+                let row: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+                row.find("create]").map(|x| (x as u16, y))
+            })
+            .expect("create button drawn");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let Screen::Create(st) = &app.screen else {
+            panic!("expected the new-database screen");
+        };
+        if !st.working {
+            wrong.push("clicking create didn't start creating");
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
 
     #[test]

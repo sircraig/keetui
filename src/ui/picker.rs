@@ -98,7 +98,7 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
                 .modified
                 .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                 .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .map(|t| t.format("%Y-%m-%d").to_string())
+                .map(|t| super::local_time(t.naive_utc(), "%Y-%m-%d"))
                 .unwrap_or_default();
             let meta = format!("{:>9}  {date}", size_label(item.size));
             let w = width(&meta);

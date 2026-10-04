@@ -30,6 +30,9 @@ use crate::clipboard::Clipboard;
 const TICK: Duration = Duration::from_millis(250);
 /// How long a termination signal waits for the main loop to exit by itself.
 const SIGNAL_GRACE: Duration = Duration::from_millis(500);
+/// How long it then waits for a save in progress, which may run a slow key
+/// derivation twice.
+const SAVE_GRACE: Duration = Duration::from_secs(120);
 
 #[derive(Parser)]
 #[command(version, about = "A KeePass-compatible TUI password manager")]
@@ -76,16 +79,19 @@ fn main() -> Result<()> {
     let quit = Arc::new(AtomicBool::new(false));
     watch_signals(clipboard.clone(), Arc::clone(&quit), mouse)?;
 
+    // The panic hook clears the clipboard and restores the terminal (mouse
+    // capture and bracketed paste included), so a crash leaves neither a
+    // secret nor an unusable shell behind. It replaces ratatui's hook, whose
+    // restore() reports failure with eprintln!: once the terminal is gone
+    // (SIGHUP) that panics inside the hook and aborts the process.
+    let default_hook = std::panic::take_hook();
     let mut terminal = ratatui::init();
-    // ratatui's panic hook restores the terminal; ours runs first to clear
-    // the clipboard and to release mouse capture, which ratatui knows nothing
-    // about, so a crash leaves neither a secret nor an unusable shell behind.
-    let hook = std::panic::take_hook();
     let on_panic = clipboard.clone();
     std::panic::set_hook(Box::new(move |info| {
         on_panic.clear_now();
         release_terminal(mouse);
-        hook(info);
+        let _ = ratatui::try_restore();
+        default_hook(info);
     }));
     // Bracketed paste delivers a paste as one event instead of keystrokes,
     // so pasted text can't run as commands.
@@ -99,6 +105,11 @@ fn main() -> Result<()> {
     // Not `restore()`: after SIGHUP the terminal is gone, and its error
     // report would panic writing to it.
     let _ = ratatui::try_restore();
+    // Dropping the Terminal re-shows a hidden cursor and reports failure the
+    // same way; when that fails, skip the drop.
+    if terminal.show_cursor().is_err() {
+        std::mem::forget(terminal);
+    }
     res
 }
 
@@ -140,13 +151,18 @@ fn release_terminal(mouse: bool) {
 
 /// SIGHUP (terminal closed), SIGTERM and SIGINT would kill keetui before it
 /// clears the clipboard. Ask the main loop to stop instead; if it hasn't
-/// within a moment (it may be busy deriving a key), clean up from here.
+/// within a moment, it is busy: let a save in progress finish (cutting it
+/// short would lose it), then clean up from here.
 fn watch_signals(clipboard: Clipboard, quit: Arc<AtomicBool>, mouse: bool) -> Result<()> {
     let mut signals = Signals::new([SIGHUP, SIGINT, SIGTERM])?;
     std::thread::spawn(move || {
         if let Some(sig) = signals.forever().next() {
             quit.store(true, Ordering::Relaxed);
             std::thread::sleep(SIGNAL_GRACE);
+            let deadline = Instant::now() + SAVE_GRACE;
+            while db::saving() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
             clipboard.clear_now();
             release_terminal(mouse);
             let _ = ratatui::try_restore();
