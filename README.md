@@ -7,6 +7,22 @@ Built with [ratatui](https://ratatui.rs) and
 [keepass-rs](https://github.com/sseemayer/keepass-rs); interoperable with
 KeePassXC.
 
+## Install
+
+Needs Rust 1.89 or newer ([rustup](https://rustup.rs)), and `wl-copy` from
+wl-clipboard for copying to the clipboard.
+
+```sh
+git clone https://github.com/sircraig/keetui
+cd keetui
+cargo install --path . --locked
+```
+
+This builds an optimized binary and puts it in `~/.cargo/bin`, which rustup
+adds to your `PATH`. Run the same command again to update after pulling, and
+`cargo uninstall keetui` to remove it. `--locked` builds with the exact
+dependency versions in `Cargo.lock`.
+
 ## Usage
 
 ```sh
