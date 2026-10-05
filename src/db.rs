@@ -333,7 +333,7 @@ fn build_key(password: &str, keyfile: Option<&Path>) -> Result<DatabaseKey> {
 /// rename it over `path`. Readers see the old or the new file, never a
 /// partial one, and a symlink at `path` is replaced rather than written
 /// through (`fs::copy` would follow it and clobber the link's target).
-fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),

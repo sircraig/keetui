@@ -19,6 +19,7 @@ use crate::db::{ChangedOnDisk, Vault};
 use crate::event::{Action, browser_action};
 use crate::generator::{self, GenOpts, MAX_LENGTH, MIN_LENGTH};
 use crate::picker::{self, PickerState};
+use crate::recent::{self, RecentState};
 use crate::{open, totp};
 
 const STATUS_TTL: Duration = Duration::from_secs(5);
@@ -192,10 +193,12 @@ pub struct CreateState {
     pub error: Option<String>,
     /// As in `UnlockState`: creation (key derivation) runs on the next tick.
     pub working: bool,
+    /// Where Esc goes.
+    back: Back,
 }
 
 impl CreateState {
-    fn new(path: &Path, keyfile: &str) -> Self {
+    fn new(path: &Path, keyfile: &str, back: Back) -> Self {
         let mut fields: Vec<TextField> = (0..4).map(|_| TextField::default()).collect();
         fields[C_PATH].set_text(&path.display().to_string());
         fields[C_KEYFILE].set_text(keyfile);
@@ -205,6 +208,7 @@ impl CreateState {
             reveal: false,
             error: None,
             working: false,
+            back,
         }
     }
 
@@ -324,7 +328,21 @@ pub struct GroupForm {
     pub modified: bool,
 }
 
+/// Where Esc leads from the unlock, file picker and new-database screens:
+/// back to the screen they were opened from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Back {
+    /// The recent databases keetui started on.
+    Recent,
+    /// The unlock screen for `App::db_path`.
+    Unlock,
+    /// The file picker, open on this folder.
+    Picker(PathBuf),
+}
+
 pub enum Screen {
+    /// The databases opened recently: where keetui starts without a path.
+    Recent(RecentState),
     /// Choose a database file.
     Picker(PickerState),
     Unlock(UnlockState),
@@ -412,6 +430,8 @@ pub enum Hit {
     LoginField(usize),
     /// A row in the file picker (index into its visible items).
     PickerItem(usize),
+    /// A database on the recent list.
+    RecentItem(usize),
     /// Click closes the current overlay.
     Dismiss,
 }
@@ -424,6 +444,12 @@ pub struct App {
     pub vault: Option<Vault>,
     pub db_path: PathBuf,
     keyfile_arg: String,
+    /// Where the databases opened recently are remembered; None remembers
+    /// nothing.
+    recent_file: Option<PathBuf>,
+    /// keetui started on the recent databases (no path was given): Esc
+    /// leads back there rather than quitting.
+    recent_home: bool,
     pub should_quit: bool,
     pub dirty: bool,
     /// The user agreed to save this database in another format.
@@ -468,11 +494,12 @@ pub struct App {
 }
 
 impl App {
-    /// `db_path` None starts in the file picker.
+    /// `db_path` None starts on the databases remembered in `recent_file`.
     pub fn new(
         db_path: Option<PathBuf>,
         keyfile: Option<PathBuf>,
         lock_after: Option<Duration>,
+        recent_file: Option<PathBuf>,
     ) -> Self {
         let keyfile_text = keyfile
             .as_deref()
@@ -480,10 +507,16 @@ impl App {
             .unwrap_or_default();
         // A path that doesn't exist yet opens the new-database screen.
         let screen = match &db_path {
-            None => Screen::Picker(PickerState::new(Path::new("."), None)),
+            None => Screen::Recent(RecentState::new(recent_file.clone(), None)),
             Some(p) if p.exists() => Screen::Unlock(UnlockState::new(&keyfile_text)),
-            Some(p) => Screen::Create(CreateState::new(p, &keyfile_text)),
+            Some(p) => {
+                // Esc there browses the folder it would go in.
+                let dir = p.parent().filter(|d| d.is_dir());
+                let dir = dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+                Screen::Create(CreateState::new(p, &keyfile_text, Back::Picker(dir)))
+            }
         };
+        let recent_home = db_path.is_none();
         let db_path = db_path.unwrap_or_default();
         App {
             screen,
@@ -491,6 +524,8 @@ impl App {
             vault: None,
             db_path,
             keyfile_arg: keyfile_text,
+            recent_file,
+            recent_home,
             should_quit: false,
             dirty: false,
             convert_ack: false,
@@ -604,6 +639,7 @@ impl App {
             return;
         }
         match self.screen {
+            Screen::Recent(_) => self.on_recent_key(key),
             Screen::Picker(_) => self.on_picker_key(key),
             Screen::Unlock(_) => self.on_unlock_key(key),
             Screen::Create(_) => self.on_create_key(key),
@@ -760,6 +796,15 @@ impl App {
                     }
                 }
             }
+            Hit::RecentItem(i) => {
+                if let Screen::Recent(st) = &mut self.screen {
+                    st.select(i);
+                    if double {
+                        let outcome = st.activate();
+                        self.on_recent_outcome(outcome);
+                    }
+                }
+            }
             Hit::LoginField(i) => match &mut self.screen {
                 Screen::Unlock(st) => st.focus_keyfile = i == 1,
                 Screen::Create(st) => st.focus = i,
@@ -770,9 +815,16 @@ impl App {
     }
 
     fn on_scroll(&mut self, pos: Position, delta: isize) {
-        if let Screen::Picker(st) = &mut self.screen {
-            st.move_by(delta);
-            return;
+        match &mut self.screen {
+            Screen::Picker(st) => {
+                st.move_by(delta);
+                return;
+            }
+            Screen::Recent(st) => {
+                st.move_by(delta);
+                return;
+            }
+            _ => {}
         }
         if self.overlay.is_some() || !matches!(self.screen, Screen::Browser) {
             return;
@@ -808,8 +860,11 @@ impl App {
             return;
         }
         match key.code {
-            // Asks first when locked with unsaved work.
-            KeyCode::Esc => self.request_quit(),
+            // Quitting asks first when locked with unsaved work.
+            KeyCode::Esc => match self.unlock_back() {
+                Some(back) => self.go_back(back),
+                None => self.request_quit(),
+            },
             KeyCode::Char('c') if ctrl => self.request_quit(),
             KeyCode::Char('k') if ctrl => st.focus_keyfile = !st.focus_keyfile,
             KeyCode::Char('n' | 'o') if ctrl && self.resume.is_some() => {
@@ -817,7 +872,7 @@ impl App {
             }
             KeyCode::Char('n') if ctrl => {
                 let path = suggest_new_path(&self.db_dir());
-                self.screen = Screen::Create(CreateState::new(&path, ""));
+                self.screen = Screen::Create(CreateState::new(&path, "", Back::Unlock));
             }
             KeyCode::Char('o') if ctrl => {
                 self.screen = Screen::Picker(PickerState::new(&self.db_dir(), Some(&self.db_path)));
@@ -900,6 +955,7 @@ impl App {
                 self.vault = Some(vault);
                 self.screen = Screen::Browser;
                 self.keyfile_arg = keyfile_text;
+                self.remember_db();
                 if resuming {
                     // Selection and expanded groups survived the lock.
                     self.rebuild();
@@ -908,6 +964,15 @@ impl App {
                 }
             }
             Err(e) => self.unlock_failed(format!("{e:#}")),
+        }
+    }
+
+    /// Put the open database first among the recent ones.
+    fn remember_db(&self) {
+        if let (Some(file), Some(v)) = (&self.recent_file, &self.vault) {
+            // Only a convenience: if the list can't be written (a read-only
+            // home, say), nothing is remembered, and that's all.
+            let _ = recent::remember(file, &v.path);
         }
     }
 
@@ -968,6 +1033,71 @@ impl App {
         }
     }
 
+    // -- recent databases -----------------------------------------------------
+
+    fn on_recent_key(&mut self, key: KeyEvent) {
+        let page = self.page_rows.get();
+        let Screen::Recent(st) = &mut self.screen else {
+            return;
+        };
+        let outcome = st.on_key(key, page);
+        self.on_recent_outcome(outcome);
+    }
+
+    fn on_recent_outcome(&mut self, outcome: recent::Outcome) {
+        match outcome {
+            recent::Outcome::Stay => {}
+            recent::Outcome::Open(path) => self.choose(path),
+            recent::Outcome::Browse => {
+                self.screen = Screen::Picker(PickerState::new(Path::new("."), None));
+            }
+            recent::Outcome::Create => {
+                let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let path = suggest_new_path(&dir);
+                let st = CreateState::new(&path, &self.keyfile_arg, Back::Recent);
+                self.screen = Screen::Create(st);
+            }
+            recent::Outcome::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Go to the unlock screen for the database at `path`.
+    fn choose(&mut self, path: PathBuf) {
+        self.db_path = path;
+        self.screen = Screen::Unlock(UnlockState::new(&self.keyfile_arg));
+    }
+
+    /// Where Esc on the unlock screen leads: back to the recent databases
+    /// keetui started on, unless that would drop unsaved work a lock is
+    /// keeping. None quits.
+    pub fn unlock_back(&self) -> Option<Back> {
+        (self.recent_home && !self.locked_with_unsaved_work()).then_some(Back::Recent)
+    }
+
+    /// Where Esc on the file picker leads: the unlock screen it was opened
+    /// from, else the recent databases keetui started on. None quits.
+    pub fn picker_back(&self) -> Option<Back> {
+        // A database is chosen exactly while its unlock screen is the one
+        // to go back to: going back to the recent list unchooses it.
+        if self.db_path.is_file() {
+            Some(Back::Unlock)
+        } else {
+            self.recent_home.then_some(Back::Recent)
+        }
+    }
+
+    fn go_back(&mut self, back: Back) {
+        self.screen = match back {
+            Back::Recent => {
+                // The database that was chosen stays selected.
+                let chosen = mem::take(&mut self.db_path);
+                Screen::Recent(RecentState::new(self.recent_file.clone(), Some(&chosen)))
+            }
+            Back::Unlock => Screen::Unlock(UnlockState::new(&self.keyfile_arg)),
+            Back::Picker(dir) => Screen::Picker(PickerState::new(&dir, None)),
+        };
+    }
+
     // -- file picker --------------------------------------------------------
 
     fn on_picker_key(&mut self, key: KeyEvent) {
@@ -982,21 +1112,16 @@ impl App {
     fn on_picker_outcome(&mut self, outcome: picker::Outcome) {
         match outcome {
             picker::Outcome::Stay => {}
-            picker::Outcome::Open(path) => {
-                self.db_path = path;
-                self.screen = Screen::Unlock(UnlockState::new(&self.keyfile_arg));
-            }
+            picker::Outcome::Open(path) => self.choose(path),
             picker::Outcome::CreateIn(dir) => {
                 let path = suggest_new_path(&dir);
-                self.screen = Screen::Create(CreateState::new(&path, &self.keyfile_arg));
+                let st = CreateState::new(&path, &self.keyfile_arg, Back::Picker(dir));
+                self.screen = Screen::Create(st);
             }
-            picker::Outcome::Back => {
-                if self.db_path.is_file() {
-                    self.screen = Screen::Unlock(UnlockState::new(&self.keyfile_arg));
-                } else {
-                    self.should_quit = true;
-                }
-            }
+            picker::Outcome::Back => match self.picker_back() {
+                Some(back) => self.go_back(back),
+                None => self.should_quit = true,
+            },
             picker::Outcome::Quit => self.should_quit = true,
         }
     }
@@ -1022,19 +1147,8 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => {
-                // Back to the unlock screen when there is a database to
-                // unlock; otherwise to the file picker.
-                if self.db_path.is_file() {
-                    self.screen = Screen::Unlock(UnlockState::new(&self.keyfile_arg));
-                } else {
-                    let dir = st
-                        .path()
-                        .parent()
-                        .filter(|d| d.is_dir())
-                        .map(Path::to_path_buf);
-                    let dir = dir.unwrap_or_else(|| PathBuf::from("."));
-                    self.screen = Screen::Picker(PickerState::new(&dir, None));
-                }
+                let back = st.back.clone();
+                self.go_back(back);
             }
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::Char('r') if ctrl => st.reveal = !st.reveal,
@@ -1074,6 +1188,7 @@ impl App {
                 let name = vault.file_name();
                 self.db_path = path;
                 self.vault = Some(vault);
+                self.remember_db();
                 self.screen = Screen::Browser;
                 self.init_after_unlock();
                 self.set_status(format!(
@@ -1089,6 +1204,15 @@ impl App {
     }
 
     fn init_after_unlock(&mut self) {
+        // Opened afresh, maybe after another database was locked: nothing
+        // carries over from that one.
+        self.convert_ack = false;
+        self.search = None;
+        self.search_input = false;
+        self.pane = Pane::Groups;
+        self.sel_entry = None;
+        self.group_offset.set(0);
+        self.entry_offset.set(0);
         let Some(v) = &self.vault else { return };
         let root = v.db.root().id();
         self.expanded =
@@ -2261,7 +2385,7 @@ mod tests {
     /// derivation) whose contents `fill` sets up.
     fn unlocked(fill: impl FnOnce(&mut keepass::Database)) -> (tempfile::TempDir, App) {
         let (dir, path) = vault_file(fill);
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -2276,6 +2400,12 @@ mod tests {
     fn vault_file(fill: impl FnOnce(&mut keepass::Database)) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.kdbx");
+        write_vault(&path, fill);
+        (dir, path)
+    }
+
+    /// Write a fresh vault (password "pw", cheap key derivation) to `path`.
+    fn write_vault(path: &Path, fill: impl FnOnce(&mut keepass::Database)) {
         let mut db = keepass::Database::new();
         if let keepass::config::KdfConfig::Argon2 {
             iterations,
@@ -2287,10 +2417,9 @@ mod tests {
             (*iterations, *memory, *parallelism) = (1, 64 * 1024, 1);
         }
         fill(&mut db);
-        let mut file = std::fs::File::create(&path).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
         db.save(&mut file, keepass::DatabaseKey::new().with_password("pw"))
             .unwrap();
-        (dir, path)
     }
 
     #[test]
@@ -2299,7 +2428,7 @@ mod tests {
         // "Creating…" frame comes first), and run_pending does.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.kdbx");
-        let mut app = App::new(Some(path.clone()), None, None);
+        let mut app = App::new(Some(path.clone()), None, None, None);
         let Screen::Create(st) = &mut app.screen else {
             panic!("expected the new-database screen");
         };
@@ -2314,7 +2443,7 @@ mod tests {
 
         // Unlocking: run_pending starts the background work right away.
         let (_dir, path) = vault_file(|_| {});
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -2328,9 +2457,198 @@ mod tests {
     }
 
     #[test]
+    fn databases_opened_or_created_are_remembered() {
+        let (dir, path) = vault_file(|_| {});
+        let list = dir.path().join("state/recent");
+        let mut app = App::new(Some(path.clone()), None, None, Some(list.clone()));
+        enter_password(&mut app, "wrong");
+        assert!(recent::load(&list).is_empty(), "remembered a failed unlock");
+        enter_password(&mut app, "pw");
+        let path = std::fs::canonicalize(path).unwrap();
+        assert_eq!(recent::load(&list), std::slice::from_ref(&path));
+
+        let new = dir.path().join("new.kdbx");
+        let mut app = App::new(Some(new.clone()), None, None, Some(list.clone()));
+        let Screen::Create(st) = &mut app.screen else {
+            panic!("expected the new-database screen");
+        };
+        st.fields[C_PASS].set_text("pw");
+        st.fields[C_CONFIRM].set_text("pw");
+        app.on_key(ctrl('s'));
+        app.run_pending();
+        assert!(matches!(app.screen, Screen::Browser), "creating failed");
+        let new = std::fs::canonicalize(new).unwrap();
+        assert_eq!(recent::load(&list), [new, path]);
+    }
+
+    /// An app started without a path, on a recent list of fresh vaults
+    /// (password "pw") with these names, newest first.
+    fn recent_app(names: &[&str]) -> (tempfile::TempDir, App, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("state/recent");
+        let dbs: Vec<PathBuf> = names
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                write_vault(&path, |_| {});
+                std::fs::canonicalize(path).unwrap()
+            })
+            .collect();
+        for db in dbs.iter().rev() {
+            recent::remember(&list, db).unwrap();
+        }
+        (dir, App::new(None, None, None, Some(list)), dbs)
+    }
+
+    /// The kind of screen on show.
+    fn screen_name(app: &App) -> &'static str {
+        match app.screen {
+            Screen::Recent(_) => "recent",
+            Screen::Picker(_) => "picker",
+            Screen::Unlock(_) => "unlock",
+            Screen::Create(_) => "create",
+            Screen::Browser => "browser",
+            Screen::EntryEdit(_) | Screen::GroupEdit(_) => "editor",
+        }
+    }
+
+    #[test]
+    fn without_a_path_keetui_starts_on_the_recent_databases() {
+        let (_dir, mut app, dbs) = recent_app(&["Home.kdbx", "Work.kdbx"]);
+        assert_eq!(screen_name(&app), "recent");
+        let text = draw_at(&app, 100, 24);
+        assert!(text.contains("Home.kdbx") && text.contains("Work.kdbx"));
+
+        // Work's unlock screen, then back with Esc, Work still selected.
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(screen_name(&app), "unlock");
+        assert_eq!(app.db_path, dbs[1]);
+        assert!(draw_at(&app, 100, 24).contains("[esc back]"));
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(&app.screen, Screen::Recent(st) if st.selected == 1));
+        assert!(!app.should_quit);
+
+        // Unlocked, it moves to the top of the list.
+        app.on_key(key(KeyCode::Enter));
+        enter_password(&mut app, "pw");
+        assert_eq!(screen_name(&app), "browser");
+        let list = app.recent_file.clone().unwrap();
+        assert_eq!(recent::load(&list), [dbs[1].clone(), dbs[0].clone()]);
+    }
+
+    #[test]
+    fn esc_goes_back_to_where_each_screen_was_opened_from() {
+        let (_dir, mut app, _dbs) = recent_app(&["Home.kdbx"]);
+        let walk = |app: &mut App, keys: &[KeyEvent]| -> Vec<&'static str> {
+            keys.iter()
+                .map(|&k| {
+                    app.on_key(k);
+                    screen_name(app)
+                })
+                .collect()
+        };
+        let esc = key(KeyCode::Esc);
+        let enter = key(KeyCode::Enter);
+        assert_eq!(walk(&mut app, &[ctrl('o'), esc]), ["picker", "recent"]);
+        assert_eq!(walk(&mut app, &[ctrl('n'), esc]), ["create", "recent"]);
+        assert_eq!(
+            walk(&mut app, &[ctrl('o'), ctrl('n'), esc, esc]),
+            ["picker", "create", "picker", "recent"]
+        );
+        // From a database's unlock screen, and back.
+        assert_eq!(
+            walk(&mut app, &[enter, ctrl('o'), esc, ctrl('n'), esc, esc]),
+            ["unlock", "picker", "unlock", "create", "unlock", "recent"]
+        );
+        // Back on the list nothing is chosen any more: the picker goes
+        // back to the list again, not to that database.
+        assert_eq!(walk(&mut app, &[ctrl('o'), esc]), ["picker", "recent"]);
+        assert!(!app.should_quit);
+        app.on_key(esc);
+        assert!(app.should_quit);
+
+        // Started with a path, there's no list to go back to.
+        let (_dir, path) = vault_file(|_| {});
+        let mut app = App::new(Some(path), None, None, None);
+        assert_eq!(walk(&mut app, &[ctrl('o'), esc]), ["picker", "unlock"]);
+        assert!(draw_at(&app, 100, 24).contains("[esc quit]"));
+        app.on_key(esc);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn the_lock_screen_goes_back_only_with_nothing_unsaved() {
+        let (_dir, mut app, _dbs) = recent_app(&["Home.kdbx"]);
+        app.on_key(key(KeyCode::Enter));
+        enter_password(&mut app, "pw");
+        app.on_key(ctrl('l'));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(screen_name(&app), "recent", "nothing is lost going back");
+
+        app.on_key(key(KeyCode::Enter));
+        enter_password(&mut app, "pw");
+        app.dirty = true;
+        app.on_key(ctrl('l'));
+        assert!(draw_at(&app, 100, 24).contains("[esc quit]"));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(screen_name(&app), "unlock", "would drop the unsaved work");
+        assert!(
+            matches!(app.overlay, Some(Overlay::Confirm(_))),
+            "asks first"
+        );
+    }
+
+    #[test]
+    fn double_clicking_a_recent_database_opens_it() {
+        let (_dir, mut app, dbs) = recent_app(&["Home.kdbx", "Work.kdbx"]);
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let rect = app
+            .hits
+            .borrow()
+            .iter()
+            .find_map(|(r, h)| matches!(h, Hit::RecentItem(1)).then_some(*r))
+            .expect("Work.kdbx is clickable");
+        let buffer = terminal.backend().buffer();
+        let row: String = (rect.left()..rect.right())
+            .map(|x| buffer[(x, rect.y)].symbol())
+            .collect();
+        assert!(row.contains("Work.kdbx"), "clickable where it is drawn");
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 3,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click);
+        assert!(matches!(&app.screen, Screen::Recent(st) if st.selected == 1));
+        app.on_mouse(click);
+        assert_eq!(screen_name(&app), "unlock");
+        assert_eq!(app.db_path, dbs[1]);
+    }
+
+    #[test]
+    fn recent_databases_survive_narrow_and_short_terminals() {
+        let (_dir, app, _dbs) = recent_app(&["Home.kdbx", "クレジットカード.kdbx"]);
+        // Nowhere to keep a list: it says so instead.
+        let nowhere = App::new(None, None, None, None);
+        assert!(draw_at(&nowhere, 100, 24).contains("can't be remembered"));
+        for app in [&app, &nowhere] {
+            for width in 1..=100 {
+                for height in [1, 7, 14, 15, 16, 24] {
+                    draw_at(app, width, height);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unlocking_can_be_cancelled() {
         let (_dir, path) = vault_file(|_| {});
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         let Screen::Unlock(st) = &mut app.screen else {
             panic!("expected the unlock screen");
         };
@@ -2438,6 +2756,40 @@ mod tests {
     }
 
     #[test]
+    fn another_database_opens_with_a_fresh_view() {
+        let (_dir, mut app) = lockable();
+        app.convert_ack = true;
+        app.on_key(key(KeyCode::Char('/')));
+        app.on_paste("Bravo");
+        app.on_key(ctrl('l'));
+        assert!(
+            app.vault.is_none(),
+            "nothing unsaved, so the vault is dropped"
+        );
+
+        // From the lock screen, open a different database.
+        let (_other_dir, other) = vault_file(|db| {
+            db.root_mut()
+                .add_entry()
+                .edit(|e| e.set_unprotected(fields::TITLE, "Other-entry"));
+        });
+        app.on_picker_outcome(picker::Outcome::Open(other));
+        enter_password(&mut app, "pw");
+        assert!(matches!(app.screen, Screen::Browser));
+        let mut stale = Vec::new();
+        if app.search.is_some() {
+            stale.push("search");
+        }
+        if app.pane != Pane::Groups {
+            stale.push("pane");
+        }
+        if app.convert_ack {
+            stale.push("consent to convert the other database's format");
+        }
+        assert!(stale.is_empty(), "carried over: {stale:?}");
+    }
+
+    #[test]
     fn quitting_while_locked_with_unsaved_work_asks_first() {
         let (_dir, mut app) = lockable();
         app.dirty = true;
@@ -2471,7 +2823,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.kdbx");
         std::fs::write(&path, b"").unwrap();
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         // A trailing newline must not submit the unlock form.
         app.on_paste("hunter2\n");
         let Screen::Unlock(st) = &app.screen else {
@@ -2976,7 +3328,7 @@ mod tests {
     #[test]
     fn a_too_small_terminal_shows_why_and_ignores_keys() {
         let (_dir, path) = vault_file(|_| {});
-        let mut app = App::new(Some(path), None, None);
+        let mut app = App::new(Some(path), None, None, None);
         // 80x12 is too short for the unlock form: it isn't drawn...
         let text = draw_at(&app, 80, 12);
         assert!(!text.contains("Password"));
@@ -3055,7 +3407,7 @@ mod tests {
     #[test]
     fn new_database_buttons_do_what_they_say() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Some(dir.path().join("new.kdbx")), None, None);
+        let mut app = App::new(Some(dir.path().join("new.kdbx")), None, None, None);
         let Screen::Create(st) = &mut app.screen else {
             panic!("expected the new-database screen");
         };
@@ -3191,7 +3543,7 @@ mod tests {
     #[test]
     fn create_form_validation() {
         let dir = tempfile::tempdir().unwrap();
-        let mut st = CreateState::new(&dir.path().join("New.kdbx"), "");
+        let mut st = CreateState::new(&dir.path().join("New.kdbx"), "", Back::Recent);
         assert!(st.validate().unwrap_err().contains("master password"));
         st.fields[C_PASS].set_text("hunter2");
         st.fields[C_CONFIRM].set_text("hunter3");
