@@ -1,6 +1,3 @@
-use std::time::UNIX_EPOCH;
-
-use chrono::DateTime;
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
@@ -12,7 +9,7 @@ use crate::app::{App, Hit};
 use crate::picker::{ItemKind, PickerState, size_label, tilde};
 
 use super::{
-    ACCENT, DIM, ERR, btn, buttons, ctrl, hit, key, modal_with_margin, scroll_offset,
+    ACCENT, DIM, ERR, btn, buttons, ctrl, file_date, hit, key, modal_with_margin, scroll_offset,
     scroll_window, selection_style, width,
 };
 
@@ -93,12 +90,7 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
         };
         frame.render_widget(Paragraph::new(name), rect);
         if item.kind == ItemKind::File {
-            let date = item
-                .modified
-                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-                .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .map(|t| super::local_time(t.naive_utc(), "%Y-%m-%d"))
-                .unwrap_or_default();
+            let date = file_date(item.modified).unwrap_or_default();
             let meta = format!("{:>9}  {date}", size_label(item.size));
             let w = width(&meta);
             if w + 20 < rect.width {
@@ -146,7 +138,7 @@ pub fn draw(frame: &mut Frame, app: &App, st: &PickerState) {
     };
     frame.render_widget(Paragraph::new(line), status);
 
-    let back = if app.db_path.is_file() {
+    let back = if app.picker_back().is_some() {
         "back"
     } else {
         "quit"

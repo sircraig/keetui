@@ -41,7 +41,7 @@ const SAVE_GRACE: Duration = Duration::from_secs(120);
 #[command(version, about = "A KeePass-compatible TUI password manager")]
 struct Args {
     /// Path to the .kdbx database file (a new one is offered if it doesn't
-    /// exist; without it, a file browser opens)
+    /// exist; without it, the databases opened recently are listed)
     database: Option<PathBuf>,
 
     /// Path to an optional key file

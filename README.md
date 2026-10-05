@@ -10,7 +10,7 @@ KeePassXC.
 ## Usage
 
 ```sh
-keetui                                       # browse for a database
+keetui                                       # pick a recent database, or browse
 keetui /path/to/vault.kdbx
 keetui /path/to/vault.kdbx --keyfile /path/to/key
 keetui /path/to/vault.kdbx --lock-after 10   # lock after 10 idle minutes (0 = never)
@@ -18,20 +18,33 @@ keetui /path/to/vault.kdbx --lock-after 10   # lock after 10 idle minutes (0 = n
 
 ### Opening a database
 
-Started without a path, keetui opens a small file browser in the current
-folder showing subfolders and `.kdbx` files. Type to filter, `↑`/`↓` to move,
-`Enter` to open a folder or database, and `Backspace`/`←` to go up. `~` jumps
-home, `/` jumps to the root, `Ctrl-a` also shows hidden and non-`.kdbx` files,
-and `Ctrl-n` creates a new database in the current folder. You can also click,
-double-click and scroll. From the unlock screen, `Ctrl-o` opens the browser to
-switch to a different database.
+Started without a path, keetui lists the databases you opened recently, newest
+first. `↑`/`↓` (or `j`/`k`) move, `Enter` or a double-click opens the selected
+database, `Ctrl-o` browses for another one, `Ctrl-n` creates a new one, and `d`
+takes the selected database off the list (the file itself is kept). A database
+that isn't where it was, deleted or on a drive that isn't mounted, is marked
+"not found". The list holds the last 10 databases that were unlocked or
+created, in `$XDG_STATE_HOME/keetui/recent` (by default
+`~/.local/state/keetui/recent`): one path per line, readable by you only.
+Delete the file to clear it.
+
+The file browser starts in the current folder, showing subfolders and `.kdbx`
+files. Type to filter, `↑`/`↓` to move, `Enter` to open a folder or database,
+and `Backspace`/`←` to go up. `~` jumps home, `/` jumps to the root, `Ctrl-a`
+also shows hidden and non-`.kdbx` files, and `Ctrl-n` creates a new database in
+the current folder. You can also click, double-click and scroll. From the
+unlock screen, `Ctrl-o` opens the browser to switch to a different database.
+
+`Esc` goes back to the screen you came from, and quits from the list of recent
+databases. Started with a path, `Esc` on the unlock screen quits.
 
 ### New database
 
 Point keetui at a file that doesn't exist yet (`keetui ~/new.kdbx`), or press
-`Ctrl-n` on the unlock screen, to create an empty database. Choose the file
-name, enter the master password twice, optionally add an existing key file, and
-press `Ctrl-s` (or `Enter` on the last fields) to create it.
+`Ctrl-n` on the recent databases, the file browser or the unlock screen, to
+create an empty database. Choose the file name, enter the master password
+twice, optionally add an existing key file, and press `Ctrl-s` (or `Enter` on
+the last fields) to create it.
 New databases are KDBX4 with Argon2d (64 MiB), and KeePassXC can open them.
 
 ### Browsing

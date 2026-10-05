@@ -117,7 +117,12 @@ pub fn draw(frame: &mut Frame, app: &App, st: &UnlockState) {
         btns.push(btn("^o", "open other", ctrl('o')));
         btns.push(btn("^n", "new", ctrl('n')));
     }
-    btns.push(btn("esc", "quit", key(KeyCode::Esc)));
+    let esc = if app.unlock_back().is_some() {
+        "back"
+    } else {
+        "quit"
+    };
+    btns.push(btn("esc", esc, key(KeyCode::Esc)));
     buttons(frame, app, inner.x, inner.bottom() - 1, inner.right(), btns);
 
     if !st.working {
@@ -206,8 +211,7 @@ pub fn draw_create(frame: &mut Frame, app: &App, st: &CreateState) {
             // Ctrl-s creates from any field (Enter only on the last ones).
             btn("^s", "create", ctrl('s')),
             btn("^r", if st.reveal { "hide" } else { "show" }, ctrl('r')),
-            // Esc always goes back: to the unlock screen when there is a
-            // database to unlock, otherwise to the file picker.
+            // Esc always goes back, to the screen this one was opened from.
             btn("esc", "back", key(KeyCode::Esc)),
         ],
     );

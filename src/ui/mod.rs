@@ -2,9 +2,12 @@ mod browser;
 mod editor;
 mod overlays;
 mod picker;
+mod recent;
 mod unlock;
 
-use chrono::{NaiveDateTime, TimeZone};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, NaiveDateTime, TimeZone};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Margin, Rect};
@@ -40,6 +43,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
     match &app.screen {
+        Screen::Recent(st) => recent::draw(frame, app, st),
         Screen::Picker(st) => picker::draw(frame, app, st),
         Screen::Unlock(st) => unlock::draw(frame, app, st),
         Screen::Create(st) => unlock::draw_create(frame, app, st),
@@ -200,6 +204,13 @@ where
     zone.from_utc_datetime(&utc).format(format).to_string()
 }
 
+/// The local date of a file's modification time.
+pub(crate) fn file_date(modified: Option<SystemTime>) -> Option<String> {
+    let secs = modified?.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let utc = DateTime::from_timestamp(secs as i64, 0)?;
+    Some(local_time(utc.naive_utc(), "%Y-%m-%d"))
+}
+
 /// The first row to show of a list of `len` rows in `height` lines, so that
 /// `selected` is in view, scrolling as little as possible from `offset`.
 /// This is what ratatui's List does for one-line items; working it out
@@ -242,6 +253,20 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Like `truncate`, but keeping the end: for paths, where the last part
+/// is what tells them apart.
+pub(crate) fn truncate_start(s: &str, max: usize) -> String {
+    let w = s.width();
+    if w <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let (rest, _) = skip_cells(s, w - (max - 1));
+    format!("…{rest}")
 }
 
 /// `s` without its first `cells` terminal cells (a wide character
@@ -483,5 +508,12 @@ mod tests {
     fn truncate_marks_cut() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 6), "hello…");
+        assert_eq!(truncate_start("~/vaults/work", 20), "~/vaults/work");
+        assert_eq!(truncate_start("~/vaults/work", 6), "…/work");
+        assert_eq!(truncate_start("~/vaults/work", 0), "");
+        // A wide character straddling the cut goes whole.
+        let cut = truncate_start("~/クレジット", 6);
+        assert_eq!(cut, "…ット");
+        assert!(cells(&cut) <= 6);
     }
 }
