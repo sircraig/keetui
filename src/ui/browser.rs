@@ -12,7 +12,7 @@ use crate::app::{App, Hit, Pane, Screen, StatusKind};
 use crate::event::Action;
 
 use super::{
-    ACCENT, Btn, DIM, ERR, HIDDEN, OK, WARN, btn, buttons, buttons_right, buttons_width, hit,
+    ACCENT, Btn, DIM, ERR, HIDDEN, OK, WARN, btn, buttons, buttons_right, buttons_width, ctrl, hit,
     hovered, key, key_bar, scroll_offset, scroll_window, selection_style, truncate, width,
 };
 
@@ -731,6 +731,7 @@ fn draw_keys(frame: &mut Frame, app: &App, area: Rect) {
     }
     if !app.search_input {
         items.push(btn("^g", "generate", act(Action::Generator)));
+        items.push(btn("^l", "lock", ctrl('l')));
         items.push(btn("?", "help", act(Action::Help)));
         items.push(btn("q", "quit", act(Action::Quit)));
     }
