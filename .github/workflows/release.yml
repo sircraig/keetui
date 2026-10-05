@@ -1,0 +1,81 @@
+# Publish to crates.io when a version tag is pushed:
+#
+#   1. bump `version` in Cargo.toml, commit and merge into main
+#   2. git tag v1.2.3 && git push origin main v1.2.3
+#
+# Nothing is published unless the checks pass, the tag matches the version in
+# Cargo.toml, and the tagged commit is on main.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# Never run two releases at once; don't cancel one that is publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+      - run: rustup default stable
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  msrv:
+    name: builds on rust-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in Cargo.toml.
+      - run: rustup toolchain install 1.89 --profile minimal --no-self-update
+      - run: cargo +1.89 check --all-targets --locked
+
+  publish:
+    name: publish to crates.io
+    needs: [check, msrv]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The token lives in this environment, which only v* tags can deploy to.
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - run: rustup default stable
+      - name: Tag matches Cargo.toml version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - name: Tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
